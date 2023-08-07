@@ -77,7 +77,7 @@ class AudioPerceptionModel(NeuralModule, Exportable):
         preprocessor: Dict[str, Any],
         encoder: Dict[str, Any],
         matcher: Dict[str, Any],
-        d_model: int,
+        output_dim: int,
         spec_augment: Optional[Dict[str, Any]] = None,
         freeze_encoder: bool = False,
     ):
@@ -87,7 +87,7 @@ class AudioPerceptionModel(NeuralModule, Exportable):
         self.encoder = encoder
         self.spec_augmentation = spec_augment
         self.matcher = matcher
-        self.proj = nn.Linear(matcher.d_model, d_model)
+        self.proj = nn.Linear(matcher.d_model, output_dim)
         if freeze_encoder:
             for params in self.encoder.parameters():
                 params.requires_grad = False
