@@ -24,4 +24,3 @@ def maybe_cast_to_list(x):
 
 def ceil_to_nearest(n, m):
     return (n + m - 1) // m * m
-

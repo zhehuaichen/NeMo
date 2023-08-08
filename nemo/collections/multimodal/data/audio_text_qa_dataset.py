@@ -25,7 +25,6 @@ import webdataset as wd
 from torch.utils.data import ChainDataset
 from tqdm import tqdm
 
-from nemo.collections.multimodal.parts.utils.data_utils import ceil_to_nearest, maybe_cast_to_list
 from nemo.collections.asr.data.audio_to_text import (
     cache_datastore_manifests,
     expand_sharded_filepaths,
@@ -35,6 +34,7 @@ from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
 from nemo.collections.common import tokenizers
 from nemo.collections.common.parts.preprocessing import collections, parsers
+from nemo.collections.multimodal.parts.utils.data_utils import ceil_to_nearest, maybe_cast_to_list
 from nemo.core.classes import Dataset, IterableDataset
 from nemo.core.neural_types import *
 from nemo.utils import logging

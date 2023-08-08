@@ -14,34 +14,31 @@
 
 import itertools
 import os
-from typing import Optional, Union, Dict
 from functools import partial
+from typing import Dict, Optional, Union
 
 import torch
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import OmegaConf, open_dict
-from nemo.collections.asr.models import ASRModel
-from nemo.utils import logging, model_utils
-from nemo.collections.asr.data.audio_to_text_dali import (
-    DALIOutputs,
-)
 from pytorch_lightning.trainer.trainer import Trainer
 
-from nemo.collections.nlp.parts.nlp_overrides import (
-    PEFTSaveRestoreConnector,
-    NLPSaveRestoreConnector,
-)
-
 from nemo.collections.asr.data import audio_to_text_dataset
-from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset
-from nemo.core.classes.mixins import AccessMixin
-from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids
+from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset, DALIOutputs
+from nemo.collections.asr.models import ASRModel
+from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
+from nemo.collections.multimodal.data.audio_text_qa_dataset import AudioQuestionAnswerDataset
+from nemo.collections.multimodal.modules.speechllm_perception import AudioPerceptionModel
+from nemo.collections.nlp.data.language_modeling.megatron.base_dataset_utils import (
+    get_datasets_weights_and_num_samples,
+)
+from nemo.collections.nlp.data.language_modeling.megatron.blendable_dataset import BlendableDataset
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_peft_models import MegatronGPTLoRAModel
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_prompt_learning_model import (
     MegatronGPTPromptLearningModel,
 )
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
+    build_position_ids,
     get_iterator_k_split,
 )
 from nemo.collections.nlp.modules.common.text_generation_utils import (
@@ -49,32 +46,15 @@ from nemo.collections.nlp.modules.common.text_generation_utils import (
     get_default_sampling_params,
     megatron_gpt_generate,
 )
-from nemo.collections.nlp.modules.common.transformer.text_generation import (
-    LengthParam,
-    SamplingParam,
-)
+from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, SamplingParam
+from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector, PEFTSaveRestoreConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
-from nemo.core.neural_types import (
-    AcousticEncodedRepresentation,
-    AudioSignal,
-    LengthsType,
-    NeuralType,
-    SpectrogramType,
-)
-from nemo.utils import AppState, logging
-from nemo.core.classes.mixins import adapter_mixins
-from nemo.collections.multimodal.data.audio_text_qa_dataset import AudioQuestionAnswerDataset
-from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-from nemo.collections.nlp.data.language_modeling.megatron.base_dataset_utils import (
-    get_datasets_weights_and_num_samples,
-)
-from nemo.collections.nlp.data.language_modeling.megatron.blendable_dataset import BlendableDataset
+from nemo.core.classes.mixins import AccessMixin, adapter_mixins
+from nemo.core.neural_types import AcousticEncodedRepresentation, AudioSignal, LengthsType, NeuralType, SpectrogramType
+from nemo.utils import AppState, logging, model_utils
 
 try:
-    from apex.transformer.pipeline_parallel.utils import (
-        get_micro_batch_size,
-        get_num_microbatches,
-    )
+    from apex.transformer.pipeline_parallel.utils import get_micro_batch_size, get_num_microbatches
 
     HAVE_APEX = True
 
@@ -101,7 +81,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
         super().__init__(cfg, trainer)
-        self.init_perception_model(cfg, trainer)
+        self.perception = AudioPerceptionModel(cfg=cfg.perception)
         self.setup_optimizer_param_groups()
         self.configure_optimizers()
         self.summarize()
@@ -182,44 +162,14 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         self._optimizer_param_groups = param_groups
         logging.info(f"Optimizer groups set:\n{self.summarize()}")
 
-    def init_perception_model(self, cfg: DictConfig, trainer: Trainer):
-        # Convert to Hydra 1.0 compatible DictConfig
-        cfg = model_utils.convert_model_config_to_dict_config(cfg)
-        cfg = model_utils.maybe_update_config_version(cfg)
-
-        if not isinstance(cfg, DictConfig):
-            raise ValueError("cfg must be an OmegaConf DictConfig")
-
-        self.perception = ModularizedAudioGPTModel.from_config_dict(
-            self.cfg.perception
-        )
-        # TODO(zhehuai): load pretrained perception model weights
-
-        # Get global rank and total number of GPU workers for IterableDataset partitioning, if applicable
-        # Global_rank and local_rank is set by LightningModule in Lightning 1.2.0
-        self.world_size = 1
-        if trainer is not None:
-            self.world_size = trainer.world_size
-        fixed_prompt_prefix_str = cfg.get("fixed_prompt_prefix", None)
-        if fixed_prompt_prefix_str is not None:
-            self.fixed_prompt_prefix = torch.Tensor(self.tokenizer.text_to_ids(
-                fixed_prompt_prefix_str
-            )).int().cuda()
-        else:
-            self.fixed_prompt_prefix = None
-
     def prepare_llm_input(self, audio_batch):
         def _concat_embs(embs1, emb1_lens, embs2, emb2_lens):
             concat_emb = []
             concat_len = []
-            for emb1, emb1_len, emb2, emb2_len in zip(
-                embs1, emb1_lens, embs2, emb2_lens
-            ):
+            for emb1, emb1_len, emb2, emb2_len in zip(embs1, emb1_lens, embs2, emb2_lens):
                 new_len = emb1_len + emb2_len
                 new_emb = torch.concat([emb1[:emb1_len], emb2[:emb2_len]], axis=0)
-                padded_new_emb = torch.zeros(
-                    emb1.shape[0] + emb2.shape[0], emb1.shape[-1]
-                )
+                padded_new_emb = torch.zeros(emb1.shape[0] + emb2.shape[0], emb1.shape[-1], device=emb1.device)
                 padded_new_emb[:new_len, ...] = new_emb
                 concat_emb.append(padded_new_emb)
                 concat_len.append(new_len)
@@ -227,23 +177,25 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             concat_len = torch.stack(concat_len, dim=0)
             return concat_emb, concat_len
 
-        def _shift_labels_by_emb_len(
-            labels, label_lens, emb_lens, max_len, pad_token=0
-        ):
+        def _shift_labels_by_emb_len(labels, label_lens, emb_lens, max_len, pad_token=0):
             shifted_labels = []
             for label, label_len, emb_len in zip(labels, label_lens, emb_lens):
-                shifted_label = torch.full([max_len], pad_token)
+                shifted_label = torch.full([max_len], pad_token, device=label.device)
                 shifted_label[emb_len : emb_len + label_len] = label[:label_len]
                 shifted_labels.append(shifted_label)
             shifted_labels = torch.stack(shifted_labels, dim=0)
             return shifted_labels
 
+        input_signal = audio_batch['audio_signal']
+        input_signal_length = audio_batch['audio_signal_length']
 
-        input_signal=audio_batch['audio_signal']
-        input_signal_length=audio_batch['audio_signal_length']
+        input_ids, input_length, labels, loss_mask = (
+            audio_batch['tokens'],
+            audio_batch['tokens_length'],
+            audio_batch['labels'],
+            audio_batch['loss_mask'],
+        )
 
-        input_ids, input_length, labels, loss_mask = audio_batch['tokens'], audio_batch['tokens_length'], audio_batch['labels'], audio_batch['loss_mask']
-        
         # [b, t, c]
         encoded, encoded_len = self.perception(
             input_signal=input_signal,
@@ -254,23 +206,17 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         # [b, t, c]
         lm_embedding = self.model.language_model.embedding
         input_embeds = lm_embedding.word_embeddings(input_ids)
-        encoder_input, encoder_length = _concat_embs(
-            encoded, encoded_len, input_embeds, input_length
-        )
-        labels = _shift_labels_by_emb_len(
-            labels, input_length, encoded_len, encoder_input.shape[1], pad_token=0
-        )
+        encoder_input, encoder_length = _concat_embs(encoded, encoded_len, input_embeds, input_length)
+        labels = _shift_labels_by_emb_len(labels, input_length, encoded_len, encoder_input.shape[1], pad_token=0)
         # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
-        loss_mask = _shift_labels_by_emb_len(
-            loss_mask, input_length, encoded_len, encoder_input.shape[1], pad_token=0
-        )
+        loss_mask = _shift_labels_by_emb_len(loss_mask, input_length, encoded_len, encoder_input.shape[1], pad_token=0)
 
         b = encoder_input.shape[0]
         max_len = encoder_input.shape[1]
 
         # Using causal attention mask for whole input
         # TODO(zhehuai): use prefixlm instead for the audio embeddings
-        attention_mask = torch.tril(torch.ones((b, max_len, max_len))).view(
+        attention_mask = torch.tril(torch.ones((b, max_len, max_len), device=encoder_input.device)).view(
             b, 1, max_len, max_len
         )
         # Convert attention mask from float to bool
@@ -278,40 +224,26 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         position_ids = build_position_ids(encoder_input[:, :, 0])
 
         # Add position embeddings
-        if hasattr(
-            lm_embedding, "position_embeddings"
-        ):
-            position_embeddings = (
-                lm_embedding.position_embeddings(
-                    position_ids
-                )
-            )
+        if hasattr(lm_embedding, "position_embeddings"):
+            position_embeddings = lm_embedding.position_embeddings(position_ids)
             encoder_input = encoder_input + position_embeddings
         else:
             encoder_input = encoder_input
         encoder_input = encoder_input.transpose(0, 1).contiguous()
         if self.cfg.get("sequence_parallel", False):
-            encoder_input = (
-                tensor_parallel.mappings.scatter_to_sequence_parallel_region(
-                    encoder_input
-                )
-            )
+            encoder_input = tensor_parallel.mappings.scatter_to_sequence_parallel_region(encoder_input)
 
         return encoder_input, attention_mask, labels, loss_mask, encoder_length
 
     def forward(
-        self,
-        audio_batch,
-        checkpoint_activations_all_layers,
+        self, audio_batch, checkpoint_activations_all_layers,
     ):
         """Forward pass of the model.
 
         We prepend audio embeddings to the instruction and label text tokens 
         as the LLM input.
         """
-        encoder_input, attention_mask, labels, loss_mask, _ = self.prepare_llm_input(
-            audio_batch
-        )
+        encoder_input, attention_mask, labels, loss_mask, _ = self.prepare_llm_input(audio_batch)
         output = self.model(
             input_ids=None,
             position_ids=None,
@@ -327,7 +259,9 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         def fwd_output_and_loss_func(dataloader_iter, model, checkpoint_activations_all_layers=None):
             batch = next(dataloader_iter)
             batch = {key: val.cuda(non_blocking=True) for key, val in batch.items()}
-            output_tensor, loss_mask = self.forward(batch, checkpoint_activations_all_layers=checkpoint_activations_all_layers)
+            output_tensor, loss_mask = self.forward(
+                batch, checkpoint_activations_all_layers=checkpoint_activations_all_layers
+            )
             output_tensor = output_tensor[0]  # get loss only, ingore logits
 
             def loss_func(output_tensor):
@@ -492,9 +426,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
 
     @classmethod
     def restore_from_pretrained_models(
-        cls,
-        cfg: Optional[Union[OmegaConf, str]] = None,
-        trainer: Optional[Trainer] = None,
+        cls, cfg: Optional[Union[OmegaConf, str]] = None, trainer: Optional[Trainer] = None,
     ):
         if not cfg.model.pretrained_audio_model:
             raise RuntimeError("PEFT training needs a pretrained audio model present.")
