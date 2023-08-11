@@ -1003,3 +1003,151 @@ class RandomizedChainDataset(ChainDataset):
                 # so that the other datasets get a chance to yield too
                 if idx >= len(d) - 1:
                     break
+
+
+class AudioToAudioPretrainDataset(AudioQuestionAnswerDataset):
+    def __init__(
+        self,
+        manifest_filepath: str,
+        tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        sample_rate: int,
+        codec_index_list: List[int],
+        codec_folder: str,
+        codec_context_num_frames: int,
+        strip_ending_num_frames: int = 50,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[int] = None,
+        min_duration: Optional[int] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        channel_selector: Optional[ChannelSelectorType] = None,
+        max_seq_length: int = 1024,
+        min_seq_length: int = 1,
+        add_bos: bool = False,
+        add_eos: bool = True,
+        add_sep: bool = False,
+        sep_id: Optional[int] = None,
+        max_num_samples: Optional[int] = None,
+        seed: int = 1234,
+        separate_prompt_and_response_with_newline: bool = False,
+        answer_only_loss: bool = True,
+        truncation_field: str = "answer",
+        pad_to_max_length: bool = False,  # (@adithyare) allows for much faster training especially in PEFT settings.
+        index_mapping_dir: str = None,
+        prompt_template: str = None,
+        virtual_tokens: int = 0,
+        tokens_to_generate: int = 0,
+        index_by_file_id: bool = False,
+    ):
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            tokenizer=tokenizer,
+            sample_rate=sample_rate,
+            int_values=int_values,
+            augmentor=augmentor,
+            max_duration=max_duration,
+            min_duration=min_duration,
+            max_utts=max_utts,
+            trim=trim,
+            channel_selector=channel_selector,
+            max_seq_length=max_seq_length,
+            min_seq_length=min_seq_length,
+            add_bos=add_bos,
+            add_eos=add_eos,
+            add_sep=add_sep,
+            sep_id=sep_id,
+            max_num_samples=max_num_samples,
+            seed=seed,
+            separate_prompt_and_response_with_newline=separate_prompt_and_response_with_newline,
+            answer_only_loss=answer_only_loss,
+            truncation_field=truncation_field,
+            pad_to_max_length=pad_to_max_length,
+            index_mapping_dir=index_mapping_dir,
+            prompt_template=prompt_template,
+            virtual_tokens=virtual_tokens,
+            tokens_to_generate=tokens_to_generate,
+            index_by_file_id=index_by_file_id,
+        )
+        # decide which index to use for the codec modeling
+        self.codec_index_list = codec_index_list
+        self.codec_folder = codec_folder
+        # specify the following frames as as the context for the codec modeling
+        # [-(codec_context_num_frames + strip_ending_num_frames):-strip_ending_num_frames]
+        self.codec_context_num_frames = codec_context_num_frames
+        self.strip_ending_num_frames = strip_ending_num_frames
+
+    def _load_acoustic_tokens(self, audio_file):
+        # Let's keep audio name and all internal directories in rel_audio_path_as_text_id to avoid any collisions
+        audio_name = os.path.basename(audio_file)
+        codec_name = os.path.splitext(audio_name)[0] + ".pt"
+        codec_path = os.path.join(self.codec_folder, codec_name)
+        if os.path.exists(codec_path):
+            try:
+                codec_codes = torch.load(codec_path).long()
+            except Exception as e:
+                print(f"Error in loading {codec_path}] e")
+        else:
+            print(f"Error in openning {codec_path}] e")
+
+        keep_codec_codes = []
+        # [1, D, T]
+        assert len(codec_codes.shape) == 3
+        codec_codes = codec_codes.squeeze(0)
+        for i in range(codec_codes.shape[0]):
+            # Convert codes to codes corresponding to megatron embedding layer
+            cur_codec_code = (codec_codes[i] + i * 1024).long()
+            # flatten it and only keep the specified dims to decide course/fine
+            if i in self.codec_index_list:
+                keep_codec_codes.append(cur_codec_code)
+        # [T, D]
+        keep_codec_codes = torch.stack(keep_codec_codes, dim=1)
+        keep_codec_codes = keep_codec_codes.flatten().tolist()
+        return keep_codec_codes
+
+    def __getitem__(self, index):
+        output = super().__getitem__(index)
+        sample = self.collection[index]
+        codec_codes = self._load_acoustic_tokens(sample.audio_file)
+
+        # truncate the context from the suffix to alliviates the hardness
+        # in disentangling the semantic and acoustic prompts in the front
+        context_ids = codec_codes[
+            -(self.codec_context_num_frames + self.strip_ending_num_frames)
+            * len(self.codec_index_list) : -self.strip_ending_num_frames
+            * len(self.codec_index_list)
+        ]
+        answer_ids = codec_codes[:]
+        assert len(context_ids) <= self.max_seq_length
+        if self.add_sep:
+            context_ids = [self.sep_id] + context_ids
+        input_ids = context_ids
+        answer_start_idx = len(input_ids)
+        # Adds sep token between prompt and answer
+        if self.add_sep:
+            input_ids = input_ids + [self.sep_id]
+            answer_start_idx += 1
+
+        # format: sep id + Audio prompt + sep id + audio label
+        # note: text question is not needed w/o LLM in the pretraining
+        input_ids = input_ids + answer_ids
+        if self.add_bos:
+            input_ids = [self.tokenizer.bos_id] + input_ids
+            answer_start_idx += 1
+        if self.add_eos:
+            input_ids = input_ids + [self.tokenizer.eos_id]
+
+        if len(input_ids) > self.max_seq_length:
+            # pad to max_seq_length in _collate_fn
+            input_ids = input_ids[: self.max_seq_length]
+
+        output.update(
+            {
+                'input_ids': input_ids,
+                'answer_start_idx': answer_start_idx,
+                'context_ids': context_ids,
+                'context_length': len(context_ids),
+            }
+        )
+
+        return output

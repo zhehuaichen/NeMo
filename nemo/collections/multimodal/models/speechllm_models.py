@@ -26,7 +26,10 @@ from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset, DALIOutputs
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-from nemo.collections.multimodal.data.audio_text_qa_dataset import AudioQuestionAnswerDataset
+from nemo.collections.multimodal.data.audio_text_qa_dataset import (
+    AudioQuestionAnswerDataset,
+    AudioToAudioPretrainDataset,
+)
 from nemo.collections.multimodal.modules.speechllm_perception import AudioPerceptionModel
 from nemo.collections.nlp.data.language_modeling.megatron.base_dataset_utils import (
     get_datasets_weights_and_num_samples,
@@ -76,7 +79,7 @@ __all__ = ["ModularizedAudioGPTModel"]
 
 
 class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
-    """Modularized speech GPT model."""
+    """Modularized speech GPT model for speech-to-text tasks."""
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
@@ -389,6 +392,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         OmegaConf.set_struct(gpt_cfg, True)
         OmegaConf.resolve(cfg)
         with open_dict(gpt_cfg):
+            gpt_cfg.sep_id = cfg.model.get('sep_id', 49704)
             gpt_cfg.megatron_amp_O2 = cfg.model.get('megatron_amp_O2', False)
             gpt_cfg.micro_batch_size = cfg.model.data.train_ds.micro_batch_size
             gpt_cfg.global_batch_size = cfg.model.data.train_ds.global_batch_size
@@ -416,6 +420,9 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             matcher_cfg = gpt_cfg.perception.matcher
             matcher_cfg.feat_in = audio_cfg.encoder.d_model
             gpt_cfg.perception.output_dim = gpt_cfg.hidden_size
+            override_vocab_size = cfg.model.get('override_vocab_size', None)
+            if override_vocab_size is not None:
+                gpt_cfg.vocab_size = override_vocab_size
             # This is needed when modifying a hparam file directly to load `.ckpt` files.
             # This is not needed to modify the cfg in `.nemo` files.
             if add_cfg_to_tree:
@@ -471,3 +478,100 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         model.perception.encoder.load_state_dict(audio_model.encoder.state_dict(), strict=True)
         logging.info(f'Loaded pretrained audio model from {pretrained_audio_model}')
         return model
+
+
+class S2SModularizedAudioGPTModel(ModularizedAudioGPTModel):
+    """Modularized speech GPT model for speech-to-speech tasks."""
+
+    def _build_dataset(self, data_cfg, is_train=True):
+        datasets = []
+
+        if isinstance(data_cfg.file_names, str):
+            file_names = data_cfg.file_names.split(',')
+        else:
+            file_names = data_cfg.file_names
+
+        if is_train and not data_cfg.get('is_tarred', False):
+            # Construct the data prefix list for `get_datasets_weights_and_num_samples()`
+            # that is of the format [weight1,file_name1,weight2,file_name2,...]
+            concat_sampling_probabilities = data_cfg.get('concat_sampling_probabilities', None)
+            if concat_sampling_probabilities is None:
+                concat_sampling_probabilities = [1.0 / len(file_names)] * len(file_names)
+            elif len(data_cfg.get('concat_sampling_probabilities', None)) != len(file_names):
+                raise ValueError(
+                    (
+                        f"concat_sampling_probabilities must be of the same size as file_names.",
+                        f"Provided size {len(data_cfg.concat_sampling_probabilities)}, number of datasets {len(file_names)}",
+                    )
+                )
+
+            data_prefix = []
+            for weight, prefix in zip(concat_sampling_probabilities, file_names):
+                data_prefix.append(weight)
+                data_prefix.append(prefix)
+
+            if self.trainer.max_steps is None or self.trainer.max_steps <= 0:
+                raise ValueError(
+                    f'Trainer max_steps must be set to a positive integer. Found {self.trainer.max_steps}'
+                )
+            num_train_samples = [self.trainer.max_steps * data_cfg.global_batch_size]
+            _, _, num_train_samples_per_dataset = get_datasets_weights_and_num_samples(data_prefix, num_train_samples)
+            num_train_samples_after_blend = sum([x[0] for x in num_train_samples_per_dataset])
+        else:
+            num_train_samples_per_dataset = [[None]] * len(data_cfg.file_names)
+
+        if 'augmentor' in data_cfg:
+            augmentor = process_augmentations(
+                data_cfg['augmentor'], global_rank=self.global_rank, world_size=self.world_size
+            )
+        else:
+            augmentor = None
+        for file_path, num_samples in zip(file_names, num_train_samples_per_dataset):
+            dataset = AudioToAudioPretrainDataset(
+                manifest_filepath=file_path,
+                tokenizer=self.tokenizer,
+                sample_rate=data_cfg.sample_rate,
+                int_values=data_cfg.get('int_values', False),
+                augmentor=augmentor,
+                max_duration=getattr(data_cfg, 'max_duration', None),
+                min_duration=getattr(data_cfg, 'min_duration', None),
+                max_utts=getattr(data_cfg, 'max_utts', -1),
+                trim=getattr(data_cfg, 'trim_silence', False),
+                channel_selector=getattr(data_cfg, 'channel_selector', None),
+                max_seq_length=data_cfg.max_seq_length,
+                min_seq_length=data_cfg.min_seq_length,
+                add_bos=data_cfg.get('add_bos', False),
+                add_eos=data_cfg.get('add_eos', True),
+                add_sep=data_cfg.get('add_sep', False),
+                sep_id=self.sep_id,
+                max_num_samples=num_samples[0],
+                seed=data_cfg.get('seed', 1234),
+                separate_prompt_and_response_with_newline=data_cfg.get(
+                    'separate_prompt_and_response_with_newline', True
+                ),
+                answer_only_loss=self.cfg.get('answer_only_loss', True),
+                truncation_field=data_cfg.get('truncation_field', 'context'),
+                pad_to_max_length=False,
+                index_mapping_dir=data_cfg.get('index_mapping_dir', None),
+                prompt_template=data_cfg.get('prompt_template', None),
+                virtual_tokens=self.virtual_tokens,
+                tokens_to_generate=data_cfg.get(
+                    'tokens_to_generate', 0
+                ),  # used at inference time to allocate tensor positions for tokens that will be generated by inf procedure.
+                # audio-to-audio specific arguments
+                codec_index_list=data_cfg.codec_index_list,
+                codec_folder=data_cfg.codec_folder,
+                codec_context_num_frames=data_cfg.get('codec_context_num_frames', 150),
+                strip_ending_num_frames=data_cfg.get('strip_ending_num_frames', 50),
+            )
+            datasets.append(dataset)
+
+        if is_train and not data_cfg.get('is_tarred', False):
+            dataset = BlendableDataset(
+                datasets=datasets, weights=concat_sampling_probabilities, size=num_train_samples_after_blend
+            )
+            return dataset
+        else:
+            return datasets
+
+    # TODO(zhehuai): support not to / partially restore the llm
