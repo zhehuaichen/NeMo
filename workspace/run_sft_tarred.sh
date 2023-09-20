@@ -11,7 +11,7 @@ EXP_NAME=AudioGPT-tarred-full-LS-debug-frz-audio-tmp8
 GLOBAL_BATCH=64
 MICRO_BATCH=32
 
-NUM_WORKERS=0
+NUM_WORKERS=2
 # TRAIN_MANIFESTS="/media/data3/librispeech_tarred/tarred_audio_manifest.json"
 # TRAIN_FILEPATHS="/media/data3/librispeech_tarred/audio__OP_0..511_CL_.tar"
 

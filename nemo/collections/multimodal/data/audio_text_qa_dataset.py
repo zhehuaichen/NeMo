@@ -163,7 +163,7 @@ def _audio_text_collate_fn(
     return batch
 
 
-class TextProcessing:
+class TextProcessing(object):
     """
     Text processing pipeline for AudioQuestionAnswerDataset and TarredAudioQuestionAnswerDataset.
     """

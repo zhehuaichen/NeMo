@@ -235,12 +235,21 @@ class ASRAudioText(AudioText):
         )
 
 
-class AudioQuestAns(_Collection):
-    """List of audio-transcript text correspondence with preprocessing."""
+class AudioQAEntity(object):
+    def __init__(self, sid, audio_file, duration, question, answer, offset, speaker, orig_sr, lang) -> None:
+        self.id = sid
+        self.audio_file = audio_file
+        self.duration = duration
+        self.question = question
+        self.answer = answer
+        self.offset = offset
+        self.speaker = speaker
+        self.orig_sr = orig_sr
+        self.lang = lang
 
-    OUTPUT_TYPE = collections.namedtuple(
-        typename='AudioQAEntity', field_names='id audio_file duration question answer offset speaker orig_sr lang',
-    )
+
+class AudioQuestAns(object):
+    """List of audio-transcript text correspondence with preprocessing."""
 
     def __init__(
         self,
@@ -279,7 +288,6 @@ class AudioQuestAns(_Collection):
             index_by_file_id: If True, saves a mapping from filename base (ID) to index in data.
         """
 
-        output_type = self.OUTPUT_TYPE
         data, duration_filtered, num_filtered, total_duration = [], 0.0, 0, 0.0
         if index_by_file_id:
             self.mapping = {}
@@ -305,7 +313,7 @@ class AudioQuestAns(_Collection):
 
             total_duration += duration
 
-            data.append(output_type(id_, audio_file, duration, question, answer, offset, speaker, orig_sr, lang))
+            data.append(AudioQAEntity(id_, audio_file, duration, question, answer, offset, speaker, orig_sr, lang))
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 if file_id not in self.mapping:
@@ -337,8 +345,15 @@ class AudioQuestAns(_Collection):
 
         logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
         logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        self.data = data
 
-        super().__init__(data)
+    def __getitem__(self, idx):
+        if idx < 0 or idx > len(self.data):
+            raise ValueError(f"index out of range [0,{len(self.data)}), got {idx} instead")
+        return self.data[idx]
+
+    def __len__(self):
+        return len(self.data)
 
 
 class ALMAudioQA(AudioQuestAns):

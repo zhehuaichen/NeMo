@@ -14,8 +14,7 @@
 
 import itertools
 import os
-from functools import partial
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 import torch
 from omegaconf import ListConfig
@@ -23,8 +22,6 @@ from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import OmegaConf, open_dict
 from pytorch_lightning.trainer.trainer import Trainer
 
-from nemo.collections.asr.data import audio_to_text_dataset
-from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset, DALIOutputs
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.common.metrics import MetricStringToTorchMetric, TextMetricsSet
@@ -98,6 +95,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
+
         super().__init__(cfg, trainer)
         self.perception = AudioPerceptionModel(cfg=cfg.perception)
         self.setup_optimizer_param_groups()
@@ -136,7 +134,6 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             for param in self.model.parameters():
                 param.requires_grad = False
             known_groups.append('model.')
-        # TODO(heh): double check this part works properly
         if self.cfg.get('freeze_matcher', False):
             self.perception.matcher.freeze()
             known_groups.append('matcher.')
@@ -216,8 +213,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         if hasattr(lm_embedding, "position_embeddings"):
             position_embeddings = lm_embedding.position_embeddings(position_ids)
             encoder_input = encoder_input + position_embeddings
-        else:
-            encoder_input = encoder_input
+
         encoder_max_length = encoder_input.shape[1]
         if lm_embedding.transpose_batch_sequence:
             encoder_input = encoder_input.transpose(0, 1).contiguous()
@@ -551,6 +547,9 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             gpt_cfg.peft = cfg.model.peft
             # for AudioGPTLoRAModel
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
+            gpt_cfg.freeze_llm = cfg.model.freeze_llm
+            gpt_cfg.freeze_audio_encoder = cfg.model.freeze_audio_encoder
+            gpt_cfg.freeze_matcher = cfg.model.freeze_matcher
             gpt_cfg.perception = cfg.model.perception
             gpt_cfg.perception.preprocessor = audio_cfg.preprocessor
             gpt_cfg.perception.encoder = audio_cfg.encoder
