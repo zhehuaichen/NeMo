@@ -3,6 +3,8 @@ export PYTHONPATH=$NEMO_DIR:$PYTHONPATH
 
 MEGATRON_CKPT=/media/data3/pretrained_models/megatron_gpt/gpt_pretrain_220m_len_4096_pos_alibi_step_595508_gbs256.nemo
 ASR_MODEL="stt_en_fastconformer_transducer_large"
+GLOBAL_BATCH=1
+MICRO_BATCH=1
 
 
 PROJECT_NAME=audio-text-llm-debug
@@ -33,6 +35,8 @@ python run_sft_audio_lm.py --config-path="../examples/multimodel/conf/speechllm/
     model.micro_batch_size=$MICRO_BATCH \
     model.pretrained_audio_model=$ASR_MODEL \
     model.restore_from_path=$MEGATRON_CKPT \
+    model.global_batch_size=$GLOBAL_BATCH \
+    model.micro_batch_size=$MICRO_BATCH \
     model.data.train_ds.manifest_filepath=$TRAIN_MANIFESTS \
     model.data.train_ds.num_workers=$NUM_WORKERS \
     model.data.validation_ds.manifest_filepath=$VAL_MANIFESTS \

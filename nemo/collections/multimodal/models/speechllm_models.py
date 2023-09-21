@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import json
 import os
 from typing import Optional, Union
 
@@ -22,7 +23,9 @@ from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import OmegaConf, open_dict
 from pytorch_lightning.trainer.trainer import Trainer
 
-from nemo.collections.asr.models import ASRModel
+from nemo.collections.asr.data import audio_to_text_dataset
+from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset, DALIOutputs
+from nemo.collections.asr.models import ASRModel, SpeechEncDecSelfSupervisedModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.common.metrics import MetricStringToTorchMetric, TextMetricsSet
 from nemo.collections.multimodal.data.audio_text_qa_dataset import (
@@ -434,7 +437,15 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
                 )
                 data_cfg.max_seq_length = self.cfg.max_position_embeddings
 
-            for file_path, num_samples in zip(manifest_filepath, num_train_samples_per_dataset):
+            for dataset_idx, (file_path, num_samples) in enumerate(
+                zip(manifest_filepath, num_train_samples_per_dataset)
+            ):
+                question_file_set = data_cfg.get('question_file_set', None)
+                if question_file_set is not None:
+                    assert len(question_file_set) == len(manifest_filepath)
+                    question_file = question_file_set[dataset_idx]
+                else:
+                    question_file = None
                 dataset = get_aqa_dataset_from_config(
                     manifest_filepath=file_path,
                     config=data_cfg,
@@ -444,6 +455,7 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
                     answer_only_loss=self.cfg.get('answer_only_loss', True),
                     virtual_tokens=self.virtual_tokens,
                     num_samples=num_samples[0],
+                    question_file=question_file,
                 )
                 datasets.append(dataset)
 
@@ -526,10 +538,16 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         OmegaConf.set_struct(gpt_cfg, True)
         OmegaConf.resolve(cfg)
         with open_dict(gpt_cfg):
+            gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
+            gpt_cfg.freeze_audio_encoder = cfg.model.get('freeze_audio_encoder', False)
+            gpt_cfg.freeze_matcher = cfg.model.get('freeze_matcher', False)
             gpt_cfg.megatron_amp_O2 = cfg.model.get('megatron_amp_O2', False)
             gpt_cfg.micro_batch_size = cfg.model.data.train_ds.micro_batch_size
             gpt_cfg.global_batch_size = cfg.model.data.train_ds.global_batch_size
             gpt_cfg.sequence_parallel = cfg.model.get("sequence_parallel", False)
+            gpt_cfg.tensor_model_parallel_size = cfg.model.get(
+                "tensor_model_parallel_size", gpt_cfg.tensor_model_parallel_size
+            )
             gpt_cfg.activations_checkpoint_granularity = cfg.model.get("activations_checkpoint_granularity", None)
             gpt_cfg.activations_checkpoint_num_layers = cfg.model.get("activations_checkpoint_num_layers", None)
             gpt_cfg.activations_checkpoint_method = cfg.model.get("activations_checkpoint_method", None)
@@ -587,12 +605,23 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             save_restore_connector=base_model_save_restore_connector,
         )
         pretrained_audio_model = cfg.model.pretrained_audio_model
-        if pretrained_audio_model.endswith('.nemo'):
-            logging.info(f'Loading pretrained audio model from local file: {pretrained_audio_model}')
-            audio_model = ASRModel.restore_from(pretrained_audio_model, map_location='cpu')
-        else:
-            logging.info(f'Loading pretrained audio model from NGC: {pretrained_audio_model}')
-            audio_model = ASRModel.from_pretrained(pretrained_audio_model, map_location='cpu')
+        try:
+            if pretrained_audio_model.endswith('.nemo'):
+                logging.info(f'Loading pretrained audio model from local file: {pretrained_audio_model}')
+                audio_model = ASRModel.restore_from(pretrained_audio_model, map_location='cpu')
+            else:
+                logging.info(f'Loading pretrained audio model from NGC: {pretrained_audio_model}')
+                audio_model = ASRModel.from_pretrained(pretrained_audio_model, map_location='cpu')
+        except:
+            logging.info(f'Fail in loading it with ASRModel. Try again with SpeechEncDecSelfSupervisedModel.')
+            if pretrained_audio_model.endswith('.nemo'):
+                logging.info(f'Loading pretrained audio model from local file: {pretrained_audio_model}')
+                audio_model = SpeechEncDecSelfSupervisedModel.restore_from(pretrained_audio_model, map_location='cpu')
+            else:
+                logging.info(f'Loading pretrained audio model from NGC: {pretrained_audio_model}')
+                audio_model = SpeechEncDecSelfSupervisedModel.from_pretrained(
+                    pretrained_audio_model, map_location='cpu'
+                )
 
         model_cfg = cls._modify_config(base_model_cfg, cfg, audio_model.cfg, add_cfg_to_tree=False)
         resume_from_checkpoint = trainer._checkpoint_connector.resume_from_checkpoint_fit_path
@@ -758,3 +787,23 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
         batch['context_lengths'] = batch['context_lengths'].cuda() + response['audio_feat_lens']
 
         return response
+
+    def test_epoch_end(self, outputs):
+        averaged_loss, averaged_metric = self.inference_epoch_end(outputs, 'test', self.cfg.data.test_ds)
+        return averaged_loss
+
+    # consistent with speech models
+    def write_predictions_to_file(self, outputs, output_file_path_prefix):
+        output_file_path = output_file_path_prefix + "_inputs_preds_labels.jsonl"
+        with open(output_file_path, "w") as f_json:
+            assert (
+                len(outputs['inputs']) == len(outputs['preds']) == len(outputs['labels']) == len(outputs['metadata'])
+            )
+            for i, p, l, m in zip(outputs['inputs'], outputs['preds'], outputs['labels'], outputs['metadata']):
+                json_string = {'input': i, 'pred_text': p, 'text': l}
+                for k, v in m.items():
+                    if k not in json_string:
+                        json_string[k] = v
+                f_json.write(json.dumps(json_string) + '\n')
+
+        logging.info(f'Predictions saved to {output_file_path}')

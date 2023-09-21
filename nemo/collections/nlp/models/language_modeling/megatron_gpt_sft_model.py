@@ -16,6 +16,7 @@ import json
 from functools import partial
 from typing import Any, Optional
 
+import sacrebleu
 import torch
 from omegaconf import DictConfig, ListConfig
 from pytorch_lightning.trainer.trainer import Trainer
@@ -416,6 +417,8 @@ class MegatronGPTSFTModel(MegatronGPTModel):
             for t, l in zip(output['token_ids'], batch['context_lengths'])
         ]
 
+        preds_text = [p.replace(data_cfg.end_string, '') for p in preds_text]
+        labels_text = [p.replace(data_cfg.end_string, '') for p in labels_text]
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
                 logging.info(f"Input: `{inputs_text[0]}`")
@@ -447,8 +450,13 @@ class MegatronGPTSFTModel(MegatronGPTModel):
     def inference_epoch_end(self, outputs, mode, data_cfg):
         # Parent class will handle logging of the loss.
         if not outputs:
+            # Handle case where no metrics. This can break checkpoint save/load.
+            app_state = AppState()
+            monitor_mode = app_state.checkpoint_callback_params.mode
+            assert monitor_mode in ['min', 'max']
+            averaged_metric = 0.0 if monitor_mode == 'max' else 1e2
             logging.warning(f"No outputs to log for {mode} epoch")
-            return
+            return torch.Tensor([1e2]), torch.Tensor([averaged_metric])
 
         if isinstance(outputs[0], dict):
             outputs = [outputs]
@@ -522,16 +530,24 @@ class MegatronGPTSFTModel(MegatronGPTModel):
             if metric_name != 'loss':
                 metric_log_key = self._determine_log_key(data_cfg, dataloader_idx, metric_name, mode)
                 # TODO(zhehuai)
-                metric_fn = self.val_metric[0] if mode == 'validation' else self.test_metric[dataloader_idx]
+                metric_fn = self.val_metric[0] if mode == 'validation' else self.test_metric[0]
                 if metric_label_key in deduplicated_outputs['metadata'][0]:
                     labels = [m[metric_label_key] for m in deduplicated_outputs['metadata']]
                 else:
                     labels = deduplicated_outputs['labels']
 
-                for pred, label in zip(deduplicated_outputs['preds'], labels):
-                    _ = metric_fn(pred, label)
+                if metric_name == 'bleu':
+                    # TODO(zhehuai): confirm with Olexsii H on the bleu is correct
+                    # _ = metric_fn(deduplicated_outputs['preds'], [[label] for label in labels])
+                    # _ = metric_fn(deduplicated_outputs['preds'], [labels])
+                    metric_result = torch.Tensor(
+                        [sacrebleu.corpus_bleu(deduplicated_outputs['preds'], [labels]).score]
+                    )
+                else:
+                    for pred, label in zip(deduplicated_outputs['preds'], labels):
+                        _ = metric_fn(pred, label)
 
-                metric_result = metric_fn.compute()
+                    metric_result = metric_fn.compute()
 
                 if metric_name == 'rouge':
                     for k, v in metric_result.items():

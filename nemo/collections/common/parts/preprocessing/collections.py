@@ -296,15 +296,17 @@ class AudioQuestAns(object):
             ids, audio_files, durations, offsets, questions, answers, speakers, orig_sampling_rates, langs
         ):
             # Duration filters.
-            if min_duration is not None and duration < min_duration:
-                duration_filtered += duration
-                num_filtered += 1
-                continue
+            if duration is not None:
+                if min_duration is not None and duration < min_duration:
+                    duration_filtered += duration
+                    num_filtered += 1
+                    continue
 
-            if max_duration is not None and duration > max_duration:
-                duration_filtered += duration
-                num_filtered += 1
-                continue
+                if max_duration is not None and duration > max_duration:
+                    duration_filtered += duration
+                    num_filtered += 1
+                    continue
+                total_duration += duration
 
             if answer is None:
                 duration_filtered += duration
@@ -359,7 +361,16 @@ class AudioQuestAns(object):
 class ALMAudioQA(AudioQuestAns):
     """`AudioQuestAns` collector from audio-LM json files."""
 
-    def __init__(self, manifests_files: Union[str, List[str]], *args, **kwargs):
+    def __init__(
+        self,
+        manifests_files: Union[str, List[str]],
+        question_file: Optional[str] = None,
+        random_context_prob: Optional[float] = None,
+        random_context_num: Optional[int] = 3,
+        random_context_positive_ratio: Optional[int] = 2,
+        *args,
+        **kwargs,
+    ):
         """Parse lists of audio files, durations and transcripts texts.
 
         Args:
@@ -382,6 +393,14 @@ class ALMAudioQA(AudioQuestAns):
             [],
             [],
         )
+        if question_file is not None:
+            self.random_questions = open(question_file).readlines()
+            print(f"Use random questions from {question_file} for {manifests_files}")
+        else:
+            self.random_questions = None
+        self.random_context_prob = random_context_prob
+        self.random_context_num = random_context_num
+        self.random_context = []
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item):
             ids.append(item['id'])
             audio_files.append(item['audio_file'])
@@ -405,32 +424,18 @@ class ALMAudioQA(AudioQuestAns):
         elif 'audio_filepath' in item:
             item['audio_file'] = item.pop('audio_filepath')
         elif 'audio_file' not in item:
-            raise ValueError(
-                f"Manifest file {manifest_file} has invalid json line structure: {line} without proper audio file key."
-            )
+            item['audio_file'] = None
 
         # If the audio path is a relative path and does not exist,
         # try to attach the parent directory of manifest to the audio path.
         # Revert to the original path if the new path still doesn't exist.
         # Assume that the audio path is like "wavs/xxxxxx.wav".
-        item['audio_file'] = manifest.get_full_path(audio_file=item['audio_file'], manifest_file=manifest_file)
+        if item['audio_file'] is not None:
+            item['audio_file'] = manifest.get_full_path(audio_file=item['audio_file'], manifest_file=manifest_file)
 
         # Duration.
         if 'duration' not in item:
-            raise ValueError(
-                f"Manifest file {manifest_file} has invalid json line structure: {line} without proper duration key."
-            )
-
-        # Question.
-        if 'question' in item:
-            pass
-        elif 'question_filepath' in item:
-            with open(item.pop('text_filepath'), 'r') as f:
-                item['question'] = f.read().replace('\n', '')
-        elif 'normalized_text' in item:
-            item['question'] = item['normalized_text']
-        else:
-            item['question'] = "what does this audio mean"
+            item['duration'] = None
 
         # Answer.
         if 'answer' in item:
@@ -444,6 +449,29 @@ class ALMAudioQA(AudioQuestAns):
             item['answer'] = item['normalized_text']
         else:
             item['answer'] = ""
+
+        # Question.
+        if 'question' in item:
+            pass
+        elif 'question_filepath' in item:
+            with open(item.pop('text_filepath'), 'r') as f:
+                item['question'] = f.read().replace('\n', '')
+        elif 'normalized_text' in item:
+            item['question'] = item['normalized_text']
+        elif self.random_questions is None:
+            item['question'] = "what does this audio mean"
+        else:
+            question = np.random.choice(self.random_questions).strip()
+            if self.random_context_prob is not None:
+                if np.random.random() < self.random_context_prob:
+                    current_words = item['answer'].strip().split()
+                    candidate_words = current_words[: len(current_words) // 2] + self.random_context
+                    context = f"Following words may occur in audio: {np.random.choice(candidate_words, self.random_context_num)} ".replace(
+                        '\n', ''
+                    )
+                    self.random_context = current_words
+                    question = context + question
+            item['question'] = question
 
         item = dict(
             audio_file=item['audio_file'],

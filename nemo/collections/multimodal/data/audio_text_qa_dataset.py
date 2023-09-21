@@ -244,9 +244,6 @@ class TextProcessing(object):
 
         function copied from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
         """
-        if self.end_string:
-            output += self.end_string
-
         if self.prompt_template is not None:
             assert f'{{{self.input_key}}}' in self.prompt_template
             assert f'{{{self.output_key}}}' in self.prompt_template
@@ -277,9 +274,11 @@ class TextProcessing(object):
             pre_pad = [self.tokenizer.eos_id] * self.virtual_tokens
         else:
             pre_pad = []
-        tokenized_text = pre_pad + self.tokenizer.text_to_ids(text, self.sample_alpha)
-        context_ids = pre_pad + self.tokenizer.text_to_ids(context, self.sample_alpha)
-        answer_ids = tokenized_text[len(context_ids) :]
+        answer_text = text[len(context) :]
+        answer_ids = pre_pad + self.tokenizer.text_to_ids(answer_text, self.sample_alpha)
+        if self.end_string:
+            answer_ids += self.tokenizer.text_to_ids(self.end_string)
+        context_ids = pre_pad + self.tokenizer.text_to_ids(context)
 
         # for the long context cases, collate_fn includes self.tokens_to_generate for padding
         total_ids = len(context_ids) + max(len(answer_ids), self.tokens_to_generate)
@@ -405,7 +404,10 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
         input_key: str = 'input',
         output_key: str = 'output',
         end_string: Optional[str] = None,
-        question_file: Optional[Union[str, List[str]]] = None,
+        question_file: Optional[str] = None,
+        random_context_prob: Optional[float] = None,
+        random_context_num: Optional[int] = 3,
+        random_context_positive_ratio: Optional[int] = 2,
         sample_alpha: Optional[float] = None,
     ):
         super().__init__(
@@ -443,6 +445,10 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
             max_number=max_utts,
             index_by_file_id=index_by_file_id,
             max_num_samples=max_num_samples,
+            question_file=question_file,
+            random_context_num=random_context_num,
+            random_context_positive_ratio=random_context_positive_ratio,
+            random_context_prob=random_context_prob,
         )
 
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
@@ -460,17 +466,23 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
         if offset is None:
             offset = 0
 
-        features = self.featurizer.process(
-            sample.audio_file,
-            offset=offset,
-            duration=sample.duration,
-            trim=self.trim,
-            orig_sr=sample.orig_sr,
-            channel_selector=self.channel_selector,
-        )
-        f, fl = features, torch.tensor(features.shape[0]).long()
-        output["audio_signal"] = f
-        output["audio_length"] = fl
+        if sample.audio_file is not None:
+            features = self.featurizer.process(
+                sample.audio_file,
+                offset=offset,
+                duration=sample.duration,
+                trim=self.trim,
+                orig_sr=sample.orig_sr,
+                channel_selector=self.channel_selector,
+            )
+            f, fl = features, torch.tensor(features.shape[0]).long()
+            output["audio_signal"] = f
+            output["audio_length"] = fl
+        else:
+            # dummy features
+            output["audio_signal"] = torch.zeros([8000])
+            # accomodates normalize_batch
+            output["audio_length"] = torch.tensor(8000)
 
         text_data = self._process_example(context=sample.question, output=sample.answer)
 
@@ -677,6 +689,10 @@ class TarredAudioQuestionAnswerDataset(TextProcessing, IterableDataset):
         input_key: str = 'input',
         output_key: str = 'output',
         end_string: Optional[str] = None,
+        question_file: Optional[str] = None,
+        random_context_prob: Optional[float] = None,
+        random_context_num: Optional[int] = 3,
+        random_context_positive_ratio: Optional[int] = 2,
         sample_alpha: Optional[float] = None,
     ):
         super().__init__(
@@ -720,6 +736,10 @@ class TarredAudioQuestionAnswerDataset(TextProcessing, IterableDataset):
             min_duration=min_duration,
             max_duration=max_duration,
             index_by_file_id=True,
+            question_file=question_file,
+            random_context_prob=random_context_prob,
+            random_context_num=random_context_num,
+            random_context_positive_ratio=random_context_positive_ratio,
         )
 
         self.len = self._compute_len()
@@ -778,33 +798,38 @@ class TarredAudioQuestionAnswerDataset(TextProcessing, IterableDataset):
         """
         audio_bytes, audio_filename, offset_id = tup
 
-        # Grab manifest entry from self.manifest_preprocessor.collection
-        file_id, _ = os.path.splitext(os.path.basename(audio_filename))
-        manifest_idx = self.collection.mapping[file_id][offset_id]
-        manifest_entry = self.collection[manifest_idx]
+        if audio_filename is not None:
+            # Grab manifest entry from self.manifest_preprocessor.collection
+            file_id, _ = os.path.splitext(os.path.basename(audio_filename))
+            manifest_idx = self.collection.mapping[file_id][offset_id]
+            manifest_entry = self.collection[manifest_idx]
 
-        # init output dict
-        output = {"idx": manifest_idx}
+            # init output dict
+            output = {"idx": manifest_idx}
 
-        offset = manifest_entry.offset
-        if offset is None:
-            offset = 0
+            offset = manifest_entry.offset
+            if offset is None:
+                offset = 0
+            # Convert audio bytes to IO stream for processing (for SoundFile to read)
+            audio_filestream = io.BytesIO(audio_bytes)
+            features = self.featurizer.process(
+                audio_filestream,
+                offset=offset,
+                duration=manifest_entry.duration,
+                trim=self.trim,
+                orig_sr=manifest_entry.orig_sr,
+            )
+            audio_filestream.close()
 
-        # Convert audio bytes to IO stream for processing (for SoundFile to read)
-        audio_filestream = io.BytesIO(audio_bytes)
-        features = self.featurizer.process(
-            audio_filestream,
-            offset=offset,
-            duration=manifest_entry.duration,
-            trim=self.trim,
-            orig_sr=manifest_entry.orig_sr,
-        )
-        audio_filestream.close()
-
-        # Audio features
-        f, fl = features, torch.tensor(features.shape[0]).long()
-        output["audio_signal"] = f
-        output["audio_length"] = fl
+            # Audio features
+            f, fl = features, torch.tensor(features.shape[0]).long()
+            output["audio_signal"] = f
+            output["audio_length"] = fl
+        else:
+            # dummy features
+            output["audio_signal"] = torch.zeros([8000])
+            # accomodates normalize_batch
+            output["audio_length"] = torch.tensor(8000)
 
         # Text features
         text_data = self._process_example(context=manifest_entry.question, output=manifest_entry.answer)
@@ -882,6 +907,12 @@ def get_tarred_aqa_dataset(
         if len(manifest_filepath) == 1:
             manifest_filepath = manifest_filepath[0]
 
+        question_file_set = config.get('question_file_set', None)
+        if question_file_set is not None:
+            assert len(question_file_set) == len(tarred_audio_filepaths)
+            question_file = question_file_set[dataset_idx]
+        else:
+            question_file = None
         dataset = TarredAudioQuestionAnswerDataset(
             audio_tar_filepaths=tarred_audio_filepath,
             manifest_filepath=manifest_filepath,
@@ -916,6 +947,10 @@ def get_tarred_aqa_dataset(
             output_key=config.get('output_key', 'output'),
             end_string=config.get('end_string', None),
             sample_alpha=config.get('sample_alpha', None),
+            question_file=question_file,
+            random_context_num=config.get('random_context_num', 3),
+            random_context_positive_ratio=config.get('random_context_positive_ratio', 2),
+            random_context_prob=config.get('random_context_prob', None),
         )
 
         if bucketing_weights:
@@ -1043,6 +1078,7 @@ def get_aqa_dataset_from_config(
     answer_only_loss: bool = True,
     virtual_tokens: int = 0,
     num_samples: Optional[List[int]] = None,
+    question_file: Optional[str] = None,
 ):
     dataset = AudioQuestionAnswerDataset(
         manifest_filepath=manifest_filepath,
@@ -1076,5 +1112,9 @@ def get_aqa_dataset_from_config(
         output_key=config.get('output_key', 'output'),
         end_string=config.get('end_string', None),
         sample_alpha=config.get('sample_alpha', None),
+        random_context_prob=config.get('random_context_prob', None),
+        random_context_num=config.get('random_context_num', 3),
+        random_context_positive_ratio=config.get('random_context_positive_ratio', 2),
+        question_file=question_file,
     )
     return dataset
