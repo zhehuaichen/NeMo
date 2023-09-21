@@ -383,6 +383,7 @@ class ALMAudioQA(AudioQuestAns):
             self.random_questions = None
         self.random_context_prob = random_context_prob
         self.random_context_num = random_context_num
+        self.random_context_positive_ratio = random_context_positive_ratio
         self.random_context = []
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item):
             ids.append(item['id'])
@@ -448,7 +449,9 @@ class ALMAudioQA(AudioQuestAns):
             if self.random_context_prob is not None:
                 if np.random.random() < self.random_context_prob:
                     current_words = item['answer'].strip().split()
-                    candidate_words = current_words[: len(current_words) // 2] + self.random_context
+                    candidate_words = (
+                        current_words[: len(current_words) // self.random_context_positive_ratio] + self.random_context
+                    )
                     context = f"Following words may occur in audio: {np.random.choice(candidate_words, self.random_context_num)} ".replace(
                         '\n', ''
                     )
