@@ -57,16 +57,22 @@ class PoolingMLPConnectors(NeuralModule, Exportable, AccessMixin):
         self.pooling = pooling
         self.pooling_factor = pooling_factor
 
+        if num_layers == 1:
+            self.hidden_dim = output_dim
+
         if pooling == "cat":
             self.preprocess = nn.Sequential(
-                ConcatPooling(pooling_factor), nn.Linear(input_dim * pooling_factor, hidden_dim)
+                ConcatPooling(pooling_factor), nn.Linear(input_dim * pooling_factor, self.hidden_dim)
             )
         else:
             self.preprocess = nn.Sequential(
-                nn.AvgPool1d(pooling_factor, stride=pooling_factor), nn.Linear(input_dim, hidden_dim)
+                nn.AvgPool1d(pooling_factor, stride=pooling_factor), nn.Linear(input_dim, self.hidden_dim)
             )
 
-        self.mlp = MLP(hidden_dim, output_dim, num_layers, activation, log_softmax=False)
+        if num_layers == 1:
+            self.mlp = nn.Identity()
+        else:
+            self.mlp = MLP(self.hidden_dim, output_dim, num_layers, activation, log_softmax=False)
 
     def forward(self, audio_signal, length=None):
         """
