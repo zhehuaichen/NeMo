@@ -12,4 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from nemo.collections.multimodal.modules.connectors import PoolingMLPConnectors
 from nemo.collections.multimodal.modules.speechllm_perception import *

@@ -572,7 +572,13 @@ class ModularizedAudioGPTModel(MegatronGPTLoRAModel):
             gpt_cfg.perception.preprocessor = audio_cfg.preprocessor
             gpt_cfg.perception.encoder = audio_cfg.encoder
             matcher_cfg = gpt_cfg.perception.matcher
-            matcher_cfg.feat_in = audio_cfg.encoder.d_model
+            if 'feat_in' in matcher_cfg:
+                matcher_cfg.feat_in = audio_cfg.encoder.d_model
+            if 'input_dim' in matcher_cfg:
+                matcher_cfg.input_dim = audio_cfg.encoder.d_model
+            if 'output_dim' in matcher_cfg:
+                matcher_cfg.output_dim = gpt_cfg.hidden_size
+
             gpt_cfg.perception.output_dim = gpt_cfg.hidden_size
             override_vocab_size = cfg.model.get('override_vocab_size', None)
             if override_vocab_size is not None:

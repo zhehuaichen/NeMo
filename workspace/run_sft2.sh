@@ -8,7 +8,7 @@ MICRO_BATCH=32
 
 
 PROJECT_NAME=audio-text-llm-debug
-EXP_NAME=AudioGPT-LS-dev-debug-frz-audio-tmp8
+EXP_NAME=AudioGPT-LS-dev-debug-frz-audio-mlp
 
 # 249 batch, 162
 GLOBAL_BATCH=64
@@ -22,7 +22,7 @@ VAL_NAMES="[dev-clean,dev-other]"
 
 # VAL_MANIFESTS="[/media/data/datasets/LibriSpeech/dev_small.json]"
 
-python run_sft_audio_lm.py --config-path="../examples/multimodel/conf/speechllm/" --config-name "modularized_speech_gpt_config" \
+python run_sft_audio_lm.py --config-path="../examples/multimodel/conf/speechllm/" --config-name "modularized_speech_gpt_mlp_config" \
     name=$EXP_NAME \
     ++exp_manager.create_wandb_logger=false \
     ++exp_manager.name=$EXP_NAME \

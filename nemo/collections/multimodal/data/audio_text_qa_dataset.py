@@ -461,10 +461,7 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
     def __getitem__(self, index):
         output = {"idx": index}
         sample = self.collection[index]
-        offset = sample.offset
-
-        if offset is None:
-            offset = 0
+        offset = sample.offset if sample.offset else 0.0
 
         if sample.audio_file is not None:
             features = self.featurizer.process(
@@ -480,9 +477,9 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
             output["audio_length"] = fl
         else:
             # dummy features
-            output["audio_signal"] = torch.zeros([8000])
+            output["audio_signal"] = torch.zeros([8])
             # accomodates normalize_batch
-            output["audio_length"] = torch.tensor(8000)
+            output["audio_length"] = torch.tensor(8)
 
         text_data = self._process_example(context=sample.question, output=sample.answer)
 
@@ -505,6 +502,47 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
             max_seq_length=self.max_seq_length,
             text_pad_id=self.pad_id,
         )
+
+
+class MultiAudioQuestionAnswerDataset(AudioQuestionAnswerDataset):
+    def __init__(
+        self, audio_locator: str = "[audio]", *args, **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.audio_locator = audio_locator
+
+    def __getitem__(self, index):
+        output = {"idx": index}
+        sample = self.collection[index]
+        offset = sample.offset if sample.offset else 0.0
+
+        if sample.audio_file is not None:
+            features = self.featurizer.process(
+                sample.audio_file,
+                offset=offset,
+                duration=sample.duration,
+                trim=self.trim,
+                orig_sr=sample.orig_sr,
+                channel_selector=self.channel_selector,
+            )
+            f, fl = features, torch.tensor(features.shape[0]).long()
+            output["audio_signal"] = f
+            output["audio_length"] = fl
+        else:
+            # dummy features
+            output["audio_signal"] = [torch.zeros([8])]
+            # accomodates normalize_batch
+            output["audio_length"] = [torch.tensor(8)]
+
+        text_data = self._process_example(context=sample.question, output=sample.answer)
+
+        output.update(text_data)
+        output['metadata'] = {
+            'audio_filepath': sample.audio_file,
+            'offset': offset,
+            'duration': sample.duration,
+        }
+        return output
 
 
 class TarredAudioFilter:
