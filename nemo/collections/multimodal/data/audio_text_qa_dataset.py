@@ -18,7 +18,6 @@ import os
 from math import isclose
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import braceexpand
 import numpy as np
 import torch
 import webdataset as wd
@@ -43,7 +42,6 @@ try:
 
     # TODO @tmoon: Use once available in Megatron-LM
     # from megatron.core.pipeline_parallel.schedules import DataIteratorList
-
     HAVE_MEGATRON_CORE = True
 
 except (ImportError, ModuleNotFoundError):
@@ -115,9 +113,9 @@ def _audio_text_collate_fn(
     sample_ids = [x["idx"] for x in batch]
     sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
 
-    audio_signal = [x["audio_signal"] for x in batch]
+    audio_signals = [x["audio_signal"] for x in batch]
     audio_lengths = [x["audio_length"] for x in batch]
-    audio_signal, audio_lengths = _audio_collate_fn(audio_signal, audio_lengths)
+    audio_signals, audio_lengths = _audio_collate_fn(audio_signals, audio_lengths)
 
     input_ids = [item['input_ids'][:-1] for item in batch]
     labels = [item['input_ids'][1:] for item in batch]
@@ -146,7 +144,7 @@ def _audio_text_collate_fn(
 
     batch = {
         'sample_ids': sample_ids,
-        'audio_signal': audio_signal,
+        'audio_signal': audio_signals,
         'audio_signal_length': audio_lengths,
         'tokens': input_ids,
         'tokens_length': input_length,
@@ -158,6 +156,69 @@ def _audio_text_collate_fn(
         'answers': answers,
         'max_length': torch.LongTensor(max_length),
         'metadata': [x['metadata'] for x in batch],
+    }
+
+    return batch
+
+
+def _multi_audio_text_collate_fn(
+    batch: Dict, tokens_to_generate: int, pad_to_max_length: bool, max_seq_length: int, text_pad_id: int,
+):
+    sample_ids = [x["idx"] for x in batch]
+    sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
+
+    audio_signals = [x["audio_signal"] for x in batch]
+    audio_lengths = [x["audio_length"] for x in batch]
+    num_audios = [len(x) for x in audio_signals]
+
+    # put all audios from all samples in one batch
+    audio_signals = [item for audio_list in audio_signals for item in audio_list]
+    audio_lengths = [item for length_list in audio_lengths for item in length_list]
+    audio_signals, audio_lengths = _audio_collate_fn(audio_signals, audio_lengths)
+
+    input_ids = [item['input_ids'][:-1] for item in batch]
+    labels = [item['input_ids'][1:] for item in batch]
+    contexts = [item['context_ids'] for item in batch]
+    context_lengths = torch.LongTensor([item['context_length'] for item in batch])
+    context_start_idx = [item['context_start_idx'] for item in batch]
+
+    answers = [item['answer_ids'] for item in batch]
+
+    loss_mask = [_build_loss_mask(item)[1:] for item in batch]
+
+    max_length = max([len(x) for x in input_ids]) + tokens_to_generate
+    # increase max length to nearest multiple of 4 or 8
+    if pad_to_max_length:
+        max_length = max_seq_length
+    else:
+        max_length = min(max_seq_length, ceil_to_nearest(max_length, 8))
+    assert max_length <= max_seq_length
+
+    position_ids = [list(range(max_length)) for _ in batch]
+    position_ids = torch.LongTensor(position_ids)
+    input_ids = torch.LongTensor(_collate_item(input_ids, max_length=max_length, pad_id=text_pad_id))
+    input_length = torch.LongTensor([len(x) for x in input_ids])
+    labels = torch.LongTensor(_collate_item(labels, max_length=max_length, pad_id=text_pad_id))
+    loss_mask = torch.LongTensor(_collate_item(loss_mask, max_length=max_length, pad_id=0))
+    contexts = torch.LongTensor(_collate_item(contexts, max_length=max_length, pad_id=text_pad_id))
+    answers = torch.LongTensor(_collate_item(answers, max_length=max_length, pad_id=text_pad_id))
+
+    batch = {
+        'sample_ids': sample_ids,
+        'audio_signal': audio_signals,
+        'audio_signal_length': audio_lengths,
+        'tokens': input_ids,
+        'tokens_length': input_length,
+        'labels': labels,
+        'loss_mask': loss_mask,
+        'position_ids': position_ids,
+        'contexts': contexts,
+        'context_lengths': context_lengths,
+        'answers': answers,
+        'max_length': torch.LongTensor(max_length),
+        'metadata': [x['metadata'] for x in batch],
+        'context_start_idx': context_start_idx,  # List[List[int]]
+        'num_audios': torch.LongTensor(num_audios),
     }
 
     return batch
@@ -236,13 +297,13 @@ class TextProcessing(object):
             self.prompt_template = self.prompt_template.encode('utf-8').decode('unicode_escape')
         assert self.truncation_field in ["answer", "context"]
 
-    def _process_example(self, context: str, output: str):
+    def _process_example(self, context: str, output: str, audio_locator: Optional[str] = None):
         """
         Create an example by concatenating text and answer.
         Truncation is carried out when needed, but it is performed only on the prompt side.
         BOS, EOS, and SEP, are added if specified.
 
-        function copied from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
+        function adapted from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
         """
         if self.prompt_template is not None:
             assert f'{{{self.input_key}}}' in self.prompt_template
@@ -278,7 +339,19 @@ class TextProcessing(object):
         answer_ids = pre_pad + self.tokenizer.text_to_ids(answer_text, self.sample_alpha)
         if self.end_string:
             answer_ids += self.tokenizer.text_to_ids(self.end_string)
-        context_ids = pre_pad + self.tokenizer.text_to_ids(context)
+
+        if audio_locator is None:
+            context_ids = self.tokenizer.text_to_ids(context)
+            context_start_idx = [0]
+        else:
+            context_ids = []
+            context_start_idx = []
+            for context_seg in context.split(audio_locator):
+                context_start_idx.append(len(context_ids))
+                context_ids.extend(self.tokenizer.text_to_ids(context_seg))
+
+        context_ids = pre_pad + context_ids
+        context_start_idx = [x + len(pre_pad) for x in context_start_idx]
 
         # for the long context cases, collate_fn includes self.tokens_to_generate for padding
         total_ids = len(context_ids) + max(len(answer_ids), self.tokens_to_generate)
@@ -328,6 +401,7 @@ class TextProcessing(object):
             'answer_start_idx': answer_start_idx,
             'context_ids': context_ids,
             'context_length': len(context_ids),
+            'context_start_idx': context_start_idx,
             'answer_ids': answer_ids,
         }
 
@@ -409,6 +483,8 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
         random_context_num: Optional[int] = 3,
         random_context_positive_ratio: Optional[int] = 2,
         sample_alpha: Optional[float] = None,
+        *args,
+        **kwargs,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -506,35 +582,76 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
 
 class MultiAudioQuestionAnswerDataset(AudioQuestionAnswerDataset):
     def __init__(
-        self, audio_locator: str = "[audio]", *args, **kwargs,
+        self, audio_locator: Optional[str] = "[audio]", *args, **kwargs,
     ):
-        super().__init__(*args, **kwargs)
         self.audio_locator = audio_locator
+        super().__init__(*args, **kwargs)
+
+    def _collate_fn(self, batch):
+        return _multi_audio_text_collate_fn(
+            batch=batch,
+            tokens_to_generate=self.tokens_to_generate,
+            pad_to_max_length=self.pad_to_max_length,
+            max_seq_length=self.max_seq_length,
+            text_pad_id=self.pad_id,
+        )
 
     def __getitem__(self, index):
         output = {"idx": index}
         sample = self.collection[index]
-        offset = sample.offset if sample.offset else 0.0
-
+        offsets = sample.offset if sample.offset else 0.0
+        durations = sample.duration if sample.duration else 0.0
+        num_audios = 0
+        output["audio_signal"] = []
+        output["audio_length"] = []
         if sample.audio_file is not None:
-            features = self.featurizer.process(
-                sample.audio_file,
-                offset=offset,
-                duration=sample.duration,
-                trim=self.trim,
-                orig_sr=sample.orig_sr,
-                channel_selector=self.channel_selector,
-            )
-            f, fl = features, torch.tensor(features.shape[0]).long()
-            output["audio_signal"] = f
-            output["audio_length"] = fl
+            audio_list = sample.audio_file
+            if isinstance(sample.audio_file, str):
+                audio_list = [sample.audio_file]
+            if not isinstance(audio_list, list):
+                raise ValueError(
+                    f"The field `audio_file` must be either a str or a list, but got type {type(sample.audio_file)} instead"
+                )
+
+            num_audios = len(audio_list)
+            if isinstance(durations, list) and len(durations) != num_audios:
+                raise ValueError(
+                    f"The number of durations ({len(durations)}) must match the number of audio clips ({num_audios})"
+                )
+            if isinstance(offsets, list) and len(offsets) != num_audios:
+                raise ValueError(
+                    f"The number of offsets ({len(offsets)}) must match the number of audio clips ({num_audios})"
+                )
+
+            for i, audio_file in enumerate(audio_list):
+                duration = durations[i] if isinstance(durations, list) else 0
+                offset = offsets[i] if isinstance(offsets, list) else 0
+                features = self.featurizer.process(
+                    audio_file,
+                    offset=offset,
+                    duration=duration,
+                    trim=self.trim,
+                    orig_sr=sample.orig_sr,
+                    channel_selector=self.channel_selector,
+                )
+                f, fl = features, torch.tensor(features.shape[0]).long()
+                output["audio_signal"].append(f)
+                output["audio_length"].append(fl)
         else:
             # dummy features
             output["audio_signal"] = [torch.zeros([8])]
             # accomodates normalize_batch
             output["audio_length"] = [torch.tensor(8)]
 
-        text_data = self._process_example(context=sample.question, output=sample.answer)
+        text_data = self._process_example(
+            context=sample.question, output=sample.answer, audio_locator=self.audio_locator
+        )
+        if isinstance(output["audio_signal"], list) and len(output["audio_signal"]) + 1 != len(
+            text_data['context_start_idx']
+        ):
+            raise ValueError(
+                f"The number of text segments ({len(text_data['context_start_idx'])}) must be one more than number of audios ({len(output['audio_signal'])})"
+            )
 
         output.update(text_data)
         output['metadata'] = {
@@ -1118,7 +1235,8 @@ def get_aqa_dataset_from_config(
     num_samples: Optional[List[int]] = None,
     question_file: Optional[str] = None,
 ):
-    dataset = AudioQuestionAnswerDataset(
+    data_cls = MultiAudioQuestionAnswerDataset if config.get('audio_locator', None) else AudioQuestionAnswerDataset
+    dataset = data_cls(
         manifest_filepath=manifest_filepath,
         tokenizer=tokenizer,
         sample_rate=config.sample_rate,
@@ -1154,5 +1272,6 @@ def get_aqa_dataset_from_config(
         random_context_num=config.get('random_context_num', 3),
         random_context_positive_ratio=config.get('random_context_positive_ratio', 2),
         question_file=question_file,
+        audio_locator=config.get('audio_locator', None),
     )
     return dataset

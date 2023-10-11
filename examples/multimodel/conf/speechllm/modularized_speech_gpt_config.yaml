@@ -67,7 +67,7 @@ model:
   pretrained_audio_model: stt_en_fastconformer_transducer_large
   freeze_llm: True
   freeze_audio_encoder: False
-  freeze_matcher: False
+  freeze_modality_adapter: False
   load_audio_encoder: True
 
   global_batch_size: 128
@@ -129,7 +129,7 @@ model:
       init_std: 0.023
 
   perception:
-    matcher: 
+    modality_adapter: 
       _target_: nemo.collections.asr.modules.ConformerEncoder
       feat_in: 1024
       feat_out: -1 # you may set it if you need different output size other than the default d_model

@@ -16,6 +16,7 @@ fastspeech_output
 
 selene_*
 draco_*
+local_stuff*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

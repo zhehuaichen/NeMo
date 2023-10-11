@@ -319,8 +319,6 @@ class MegatronGPTSFTModel(MegatronGPTModel):
 
     def fwd_bwd_step(self, dataloader_iter, batch_idx, forward_only):
         batch = next(dataloader_iter)
-        # Pass only torch.Tensor to prevent errors when process get_iterator_k_split()
-        batch = {k: v for k, v in batch.items() if isinstance(v, torch.Tensor)}
         _, seq_length = batch['tokens'].shape
         tensor_shape = [seq_length, get_micro_batch_size(), self.cfg.hidden_size]
         data_iter = get_iterator_k_split(batch, get_num_microbatches())
@@ -417,8 +415,10 @@ class MegatronGPTSFTModel(MegatronGPTModel):
             for t, l in zip(output['token_ids'], batch['context_lengths'])
         ]
 
-        preds_text = [p.replace(data_cfg.end_string, '') for p in preds_text]
-        labels_text = [p.replace(data_cfg.end_string, '') for p in labels_text]
+        if data_cfg.get("end_string", None):
+            preds_text = [p.replace(data_cfg.end_string, '') for p in preds_text]
+            labels_text = [p.replace(data_cfg.end_string, '') for p in labels_text]
+
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
                 logging.info(f"Input: `{inputs_text[0]}`")

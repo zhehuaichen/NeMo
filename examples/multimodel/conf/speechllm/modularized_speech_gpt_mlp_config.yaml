@@ -67,7 +67,7 @@ model:
   pretrained_audio_model: stt_en_fastconformer_transducer_large
   freeze_llm: True
   freeze_audio_encoder: False
-  freeze_matcher: False
+  freeze_modality_adapter: False
   load_audio_encoder: True
 
   global_batch_size: 128
@@ -129,7 +129,7 @@ model:
       init_std: 0.023
 
   perception:
-    matcher: 
+    modality_adapter: 
       _target_: nemo.collections.multimodal.modules.PoolingMLPConnectors
       input_dim: -1
       output_dim: -1
