@@ -1,49 +1,68 @@
-import os
-import torch
-import random
-from tqdm import tqdm
 import json
+import os
+import random
+import sys
+import numpy as np
+import torch
+from tqdm import tqdm
 from tts_normalization_utils import get_normalizer, normalize
-from nemo.collections.asr.parts.preprocessing.features import normalize_batch, clean_spectrogram_batch
+
+from nemo.collections.asr.parts.preprocessing.features import clean_spectrogram_batch, normalize_batch
+from nemo.collections.tts.models import FastPitchModel, SpectrogramEnhancerModel
 from nemo.core.classes import typecheck
 
-from nemo.collections.tts.models import FastPitchModel, SpectrogramEnhancerModel
-
-manifest_file = "squadv2_train_not_normalized.json"
-output_dir = f"./features_{manifest_file}"
+manifest_file = sys.argv[1]
+manifest_name = os.path.basename(manifest_file).split(".")[0]
+output_dir = f"./outputs/{manifest_name}/audios/"
 normalize_type = "per_feature"
-do_normalize = True
+do_normalize = False
 do_lowercase = False
 use_enhancer = False  # TODO: fix it. It has a bug!
+max_src_len = 256
+sample_rate = 44100
 
-
-def generate_spec(tts_model, text, normalizer=None, do_lowercase=False, enhancer_model=None):
+# https://registry.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/tts_en_multispeaker_fastpitchhifigan
+def generate_spec(
+    tts_model, vocoder, text, normalizer=None, do_lowercase=False, enhancer_model=None, output_file_path=None
+):
+    original_len = len(text)
     if normalizer:
         text = normalize(text=text, normalizer=normalizer, do_lowercase=do_lowercase)
 
-    src_ids = tts_model.parser(text)  # alternative tts_model.vocab.encode(text)
-    src_ids = torch.tensor([src_ids]).to(tts_model.device)
+    src_ids = tts_model.parse(text, normalize=True)  # alternative tts_model.vocab.encode(text)
 
     with torch.no_grad():
         speaker_id = random.randint(0, n_speakers - 1)
         speaker_id = torch.tensor([speaker_id]).to(src_ids.device)
-        signal, signal_len, *_ = tts_model(text=src_ids, durs=None, pitch=None, speaker=speaker_id, pace=1.0)
-        if enhancer_model:
-            with typecheck.disable_checks():
-                signal = enhancer_model.forward(input_spectrograms=signal, lengths=signal_len)
+        spectrogram = tts_model.generate_spectrogram(tokens=src_ids, speaker=speaker_id)
+        audio = vocoder.convert_spectrogram_to_audio(spec=spectrogram)
+        duration = audio.shape[1] / sample_rate
+        # print(original_len, src_ids.shape, duration)
 
-        signal, *_ = normalize_batch(x=signal, seq_len=signal_len, normalize_type=normalize_type)
-        signal = clean_spectrogram_batch(signal, signal_len)
+        # Save the audio to disk in a file called speech.wav
+        sf.write(output_file_path, np.ravel(audio.to('cpu').numpy()), sample_rate, format='WAV')
 
-    return signal
+    return audio, duration
 
 
-tts_model = FastPitchModel.from_pretrained(model_name="tts_en_fastpitch_for_asr_finetuning")
-n_speakers = tts_model.cfg.n_speakers
+tts_model = FastPitchModel.from_pretrained("tts_en_fastpitch_multispeaker")
 tts_model.eval().cuda()
 
+
+# Load Vocoder
+from nemo.collections.tts.models import HifiGanModel
+
+vocoder = HifiGanModel.from_pretrained(model_name="tts_en_hifitts_hifigan_ft_fastpitch")
+vocoder.eval().cuda()
+n_speakers = tts_model.cfg.n_speakers
+
+# Generate audio
+import soundfile as sf
+
 if use_enhancer:
-    enhancer_model = SpectrogramEnhancerModel.from_pretrained(model_name="tts_en_spectrogram_enhancer_for_asr_finetuning")
+    enhancer_model = SpectrogramEnhancerModel.from_pretrained(
+        model_name="tts_en_spectrogram_enhancer_for_asr_finetuning"
+    )
     enhancer_model.eval().cuda()
 else:
     enhancer_model = None
@@ -54,11 +73,45 @@ else:
     normalizer = None
 
 os.makedirs(output_dir, exist_ok=True)
-
+max_num = 200000
+tts_list = []
+processed_tts_list = []
 with open(manifest_file, 'r') as f:
-    for line in tqdm(f):
+    # filter according to len
+    for i, line in enumerate(tqdm(f)):
         sample = json.loads(line)
-        spec = generate_spec(tts_model, text=sample["context"], normalizer=normalizer, do_lowercase=do_lowercase, enhancer_model=enhancer_model)
-        output_file_path = os.path.join(output_dir, sample["sample_id"]) + ".pt"
-        torch.save(spec, output_file_path)
-        print("Saved:", output_file_path)
+        if len(sample["context"]) < max_src_len:
+            tts_list.append(sample)
+    print(f"num of audios: {i}; after filtering {len(tts_list)}")
+    for i, sample in enumerate(tqdm(tts_list)):
+        sample = sample.copy()
+        output_file_path = os.path.join(output_dir, sample["sample_id"]) + ".wav"
+        sample['audio_filepath'] = os.path.join("./audios", sample["sample_id"]) + ".wav"
+        sample['question'] = sample['instruction']
+        del sample['instruction']
+        sample['text'] = sample['output']
+        del sample['output']
+
+        try:
+            audio, duration = generate_spec(
+                tts_model,
+                vocoder,
+                text=sample["context"],
+                normalizer=normalizer,
+                do_lowercase=do_lowercase,
+                enhancer_model=enhancer_model,
+                output_file_path=output_file_path,
+            )
+            sample['duration'] = duration
+            processed_tts_list.append(sample)
+        except Exception as error:
+            print(f"sample {sample} with error: {error}")
+
+        if i >= max_num:
+            break
+content = ''
+for sample in processed_tts_list:
+    content += json.dumps(sample) + '\n'
+final = open(output_dir + f'/../{manifest_name}.json', "w")
+final.write(content)
+final.close()
