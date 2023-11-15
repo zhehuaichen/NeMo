@@ -302,8 +302,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         input_signal_length = audio_batch['audio_signal_length']
 
         input_ids, input_length, labels, loss_mask = (
-            audio_batch['tokens'],
-            audio_batch['tokens_length'],
+            audio_batch['contexts'],
+            audio_batch['context_lengths'],
             audio_batch['labels'],
             audio_batch['loss_mask'],
         )
@@ -896,7 +896,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         predicted_token_ids, log_probs = self.frozen_model.decode(
             tokens_enc=None,
             enc_mask=enc_mask,
-            num_tokens_to_generate=self.decoder_seq_length,
+            num_tokens_to_generate=self._inference_config['tokens_to_generate'],
             encoder_input=encoder_input,
         )
 

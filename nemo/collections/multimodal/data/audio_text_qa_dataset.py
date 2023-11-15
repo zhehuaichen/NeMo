@@ -364,6 +364,7 @@ class TextProcessing:
             input_ids = input_ids + [self.tokenizer.eos_id]
             if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
                 masked_input_ids = masked_input_ids + [self.tokenizer.eos_id]
+            answer_ids = answer_ids + [self.tokenizer.eos_id]
 
         if len(input_ids) > self.max_seq_length:
             logging.warning(f'Input ids length {len(input_ids)} exceed max sequence length {self.max_seq_length}')

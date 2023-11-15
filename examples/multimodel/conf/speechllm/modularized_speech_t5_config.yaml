@@ -102,9 +102,9 @@ model:
   # override_vocab_size: 1024
 
   lora_tuning:
-    kqv_adapter_dim: 48
-    kv_adapter_dim: 32
-    q_adapter_dim: 16
+    kqv_adapter_dim: 128
+    kv_adapter_dim: 64
+    q_adapter_dim: 32
     adapter_dropout: 0.0
     column_init_method: 'xavier' # IGNORED if linear_adapter is used, options: xavier, zero or normal
     row_init_method: 'zero' # IGNORED if linear_adapter is used, options: xavier, zero or normal
@@ -221,8 +221,8 @@ model:
       concat_sampling_probabilities: null # When providing a list of datasets, this arg defines the sampling probabilities from each dataset when strategy='random'
       context_key: 'input'
       label_key: 'output'
-      # add_eos: True
-      add_eos: False
+      add_eos: True
+      # add_eos: False
       end_string: ${model.data.end_string}
       add_sep: False
       add_bos: False
