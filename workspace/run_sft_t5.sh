@@ -30,19 +30,27 @@ VAL_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10.json,/media/data/da
 valid_questions=[/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json]
 VAL_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10.json]
 
-#python \
+ export HF_HOME="/hfcache/" 
+ export HF_DATASETS_CACHE="/hfcache/datasets" 
+ export TRANSFORMERS_CACHE="/hfcache/models" 
 python -m pdb -c continue \
 run_sft_audio_lm_t5.py --config-path="../examples/multimodel/conf/speechllm/" --config-name "modularized_speech_t5_config" \
     model.pretrained_audio_model=$ASR_MODEL \
     model.language_model_path=$MEGATRON_CKPT \
     model.global_batch_size=$GLOBAL_BATCH \
     model.micro_batch_size=$MICRO_BATCH \
+    ++model.vocab_file=/tmp/megatron-bert-345m-cased_vocab  \
     ++model.data.train_ds.question_file_set=$train_questions \
     ++model.data.train_ds.random_context_prob=0.5 \
     ++model.data.train_ds.random_context_num=64 \
     ++model.data.validation_ds.question_file_set=$valid_questions \
     ++model.data.validation_ds.random_context_prob=0.5 \
     ++model.data.validation_ds.random_context_num=64 \
+    ++inference.greedy=False \
+    ++inference.top_k=50 \
+    ++inference.top_p=0.95 \
+    ++inference.temperature=0.4 \
+    ++inference.repetition_penalty=1.2 \
     model.data.train_ds.manifest_filepath=$TRAIN_MANIFESTS \
     model.data.validation_ds.manifest_filepath=$VAL_MANIFESTS
 

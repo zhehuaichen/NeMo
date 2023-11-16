@@ -548,6 +548,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         OmegaConf.set_struct(gpt_cfg, True)
         OmegaConf.resolve(cfg)
         with open_dict(gpt_cfg):
+            if 'vocab_file' in cfg.model:
+                gpt_cfg.tokenizer.vocab_file = cfg.model.vocab_file
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
             gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
             gpt_cfg.text_loss_weight = cfg.model.get('text_loss_weight', 1.0)
