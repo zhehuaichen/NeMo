@@ -318,13 +318,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         encoder_input, attention_mask, encoder_length, _, encoder_max_length = self.inject_perception_input(
             encoded, encoded_len, input_ids, input_length
         )
-        labels = self._shift_labels_by_emb_len(labels, input_length, encoded_len, encoder_max_length, pad_token=0)
-        # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
-        loss_mask = self._shift_labels_by_emb_len(
-            loss_mask, input_length, encoded_len, encoder_max_length, pad_token=0
-        )
-
-        return encoder_input, attention_mask, labels, loss_mask, encoder_length
+        return encoder_input, attention_mask, encoder_length
 
     def forward(
         self, audio_batch, checkpoint_activations_all_layers,
@@ -338,7 +332,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             self.log(
                 'audio_ratio', audio_batch['audio_ratio'].mean(), prog_bar=True, batch_size=1, rank_zero_only=False
             )
-        encoder_input, attention_mask, _, _, _ = self.prepare_llm_input(audio_batch)
+        encoder_input, attention_mask, _ = self.prepare_llm_input(audio_batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         b = audio_batch['answers'].shape[0]
@@ -889,7 +883,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
 
         batch = {key: val.cuda(non_blocking=True) for key, val in batch.items() if key != 'metadata'}
-        encoder_input, attention_mask, _, _, _ = self.prepare_llm_input(batch)
+        encoder_input, attention_mask, _ = self.prepare_llm_input(batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         device = batch['audio_signal'].device
