@@ -861,9 +861,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         inputs_text = [self.tokenizer.ids_to_text(c.tolist()) for c in batch['contexts']]
         labels_text = [self.tokenizer.ids_to_text(a.tolist()) for a in batch['answers']]
         preds_text = output['preds_text']
-
-        preds_text = [p.replace(data_cfg.end_string, '') for p in preds_text]
-        labels_text = [p.replace(data_cfg.end_string, '') for p in labels_text]
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
                 logging.info(f"Input: `{inputs_text[0]}`")
