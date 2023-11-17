@@ -318,7 +318,9 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         encoder_input, attention_mask, encoder_length, _, encoder_max_length = self.inject_perception_input(
             encoded, encoded_len, input_ids, input_length
         )
-        return encoder_input, attention_mask, encoder_length
+        # generate encoder_mask from encoder_length
+        enc_mask = torch.arange(encoder_input.shape[1], device=encoder_input.device)[None, :] < encoder_length[:, None]
+        return encoder_input, attention_mask, enc_mask
 
     def forward(
         self, audio_batch, checkpoint_activations_all_layers,
@@ -332,7 +334,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             self.log(
                 'audio_ratio', audio_batch['audio_ratio'].mean(), prog_bar=True, batch_size=1, rank_zero_only=False
             )
-        encoder_input, attention_mask, _ = self.prepare_llm_input(audio_batch)
+        encoder_input, attention_mask, enc_mask = self.prepare_llm_input(audio_batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         b = audio_batch['answers'].shape[0]
@@ -341,7 +343,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             [torch.full([b, 1], self.tokenizer.bos_id, device=device), audio_batch['answers'][:, :-1]], dim=-1
         )
         labels = audio_batch['answers']
-        enc_mask = torch.full(encoder_input[:, :, 0].shape, True, device=device).long().contiguous()
         dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()
         output = self.frozen_model.enc_dec_model(
             enc_input_ids=None,
@@ -883,11 +884,10 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
 
         batch = {key: val.cuda(non_blocking=True) for key, val in batch.items() if key != 'metadata'}
-        encoder_input, attention_mask, _ = self.prepare_llm_input(batch)
+        encoder_input, attention_mask, enc_mask = self.prepare_llm_input(batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         device = batch['audio_signal'].device
-        enc_mask = torch.full(encoder_input[:, :, 0].shape, True, device=device).long().contiguous()
 
         predicted_token_ids, log_probs = self.frozen_model.decode(
             tokens_enc=None,
