@@ -20,6 +20,8 @@ train_questions=[/media/data/datasets/LibriSpeech/dev_clean_10_q_set.json,/media
 TRAIN_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10_text.json,/media/data/datasets/LibriSpeech/dev_clean_10.json]
 TRAIN_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10.json,/media/data/datasets/LibriSpeech/dev_clean_10_text.json]
 train_questions=[/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json,/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json]
+TRAIN_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_2.json.diff]
+train_questions=[/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json]
 VAL_MANIFESTS=/media/data/datasets/LibriSpeech/dev_clean_150_r.json
 VAL_MANIFESTS=/media/data/datasets/LibriSpeech/dev_clean_2.json
 VAL_MANIFESTS=/media/data/datasets/LibriSpeech/dev_clean_300.json
@@ -29,6 +31,8 @@ VAL_MANIFESTS=/media/data/datasets/LibriSpeech/dev_clean_10.json
 VAL_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10.json,/media/data/datasets/LibriSpeech/dev_clean_11.json]
 valid_questions=[/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json,/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json]
 VAL_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_10.json,/media/data/datasets/LibriSpeech/dev_clean_10_text.json]
+VAL_MANIFESTS=[/media/data/datasets/LibriSpeech/dev_clean_2.json.diff]
+valid_questions=[/media/data/datasets/LibriSpeech/dev_clean_11_q_set.json]
 
  export HF_HOME="/hfcache/" 
  export HF_DATASETS_CACHE="/hfcache/datasets" 

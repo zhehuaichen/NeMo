@@ -42,6 +42,7 @@ from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_sampler
 )
 from nemo.collections.nlp.models.language_modeling.megatron_finetune_model import MegatronT5FinetuneModel
 from nemo.collections.nlp.models.language_modeling.megatron_t5_adapter_model import MegatronT5LoraModel
+from nemo.collections.nlp.models.nlp_model import NLPModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     build_position_ids,
@@ -665,9 +666,16 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             )
 
     def state_dict(self, destination=None, prefix=None, keep_vars=False):
-        return_state_dict = super().state_dict(destination, prefix, keep_vars)
-        state_dict = self.perception.state_dict(prefix="perception.")
-        return_state_dict.update(state_dict)
+        if self.setup_complete:
+            # save adapter
+            return_state_dict = super().state_dict(destination, prefix, keep_vars)
+            # save perception
+            if not self.cfg.get('freeze_audio_encoder', False):
+                perception_state_dict = self.perception.state_dict(prefix="perception.")
+                return_state_dict.update(perception_state_dict)
+            # TODO(zhehuai): store llm if not freezing it
+        else:
+            return_state_dict = self.frozen_model.state_dict(prefix="frozen_model.")
         return return_state_dict
 
     def load_state_dict(self, state_dict, strict: bool = True):
@@ -676,7 +684,18 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         only for the adapter parameters.
         """
         if self.setup_complete:
+            # load adapters
+            print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
             super().load_state_dict(state_dict, strict)
+            # load perception
+            perception_state_dict = self.perception.state_dict(prefix="perception.")
+            print(f"loading state_dict {self.setup_complete}: {perception_state_dict.keys()}")
+            super(NLPModel, self).load_state_dict(perception_state_dict, strict=False)
+        else:
+            # load frozen llm
+            state_dict = self.frozen_model.state_dict(prefix="frozen_model.")
+            print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
+            super(NLPModel, self).load_state_dict(state_dict, strict=False)
 
     def build_train_valid_test_datasets(self, stage):
         if stage != 'test':
