@@ -685,15 +685,12 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         """
         if self.setup_complete:
             # load adapters
-            print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
             super().load_state_dict(state_dict, strict)
             # load perception
-            perception_state_dict = self.perception.state_dict(prefix="perception.")
-            print(f"loading state_dict {self.setup_complete}: {perception_state_dict.keys()}")
-            super(NLPModel, self).load_state_dict(perception_state_dict, strict=False)
+            print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
+            super(NLPModel, self).load_state_dict(state_dict, strict=False)
         else:
             # load frozen llm
-            state_dict = self.frozen_model.state_dict(prefix="frozen_model.")
             print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
             super(NLPModel, self).load_state_dict(state_dict, strict=False)
 
@@ -1223,3 +1220,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             return base_key + name
         else:
             return base_key + f"dataloader{dataloader_idx}"
+
+    def test_step(self, dataloader_iter, batch_idx, dataloader_idx=0):
+        return self.inference_step(dataloader_iter, batch_idx, 'test')
