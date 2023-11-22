@@ -673,7 +673,10 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             if not self.cfg.get('freeze_audio_encoder', False):
                 perception_state_dict = self.perception.state_dict(prefix="perception.")
                 return_state_dict.update(perception_state_dict)
-            # TODO(zhehuai): store llm if not freezing it
+            # store llm if not freezing it
+            if not self.cfg.get('freeze_llm', True):
+                llm_state_dict = self.frozen_model.state_dict(prefix="frozen_model.")
+                return_state_dict.update(llm_state_dict)
         else:
             return_state_dict = self.frozen_model.state_dict(prefix="frozen_model.")
         return return_state_dict
