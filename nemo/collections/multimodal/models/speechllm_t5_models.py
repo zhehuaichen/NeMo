@@ -693,7 +693,10 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
             super(NLPModel, self).load_state_dict(state_dict, strict=False)
         else:
-            # load frozen llm
+            if len([i for i in state_dict.keys() if 'lora' in i]) > 0:
+                # load adapters
+                super().load_state_dict(state_dict, strict)
+            # load frozen llm and maybe perception model
             print(f"loading state_dict {self.setup_complete}: {state_dict.keys()}")
             super(NLPModel, self).load_state_dict(state_dict, strict=False)
 
