@@ -592,9 +592,9 @@ class AudioQuestionAnswerDataset(TextProcessing, Dataset):
             audio_ratio = 1
         else:
             # dummy features
-            output["audio_signal"] = torch.zeros([8000])
+            output["audio_signal"] = torch.zeros([160000])
             # accomodates normalize_batch
-            output["audio_length"] = torch.tensor(8000)
+            output["audio_length"] = torch.tensor(160000)
             audio_ratio = 0
 
         text_data = self._process_example(context=sample.question, output=sample.answer)
@@ -703,9 +703,9 @@ class MultiAudioQuestionAnswerDataset(AudioQuestionAnswerDataset):
             audio_ratio = 1
         else:
             # dummy features
-            output["audio_signal"] = [torch.zeros([8000])]
+            output["audio_signal"] = [torch.zeros([160000])]
             # accomodates normalize_batch
-            output["audio_length"] = [torch.tensor(8000)]
+            output["audio_length"] = [torch.tensor(160000)]
             audio_ratio = 0
             offset = 0
 
@@ -1106,9 +1106,9 @@ class IterableTextDataset(TextProcessing, IterableDataset):
             offset = 0
 
         # dummy features
-        output["audio_signal"] = torch.zeros([8000])
+        output["audio_signal"] = torch.zeros([160000])
         # accomodates normalize_batch
-        output["audio_length"] = torch.tensor(8000)
+        output["audio_length"] = torch.tensor(160000)
 
         text_data = self._process_example(context=sample.question, output=sample.answer)
 
