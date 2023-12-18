@@ -611,10 +611,14 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             gpt_cfg.pretrained_audio_model = cfg.model.get('pretrained_audio_model', None)
 
             modality_adapter_cfg = gpt_cfg.perception.modality_adapter
+            if 'd_model' not in audio_cfg.encoder:
+                d_model = audio_cfg.encoder.jasper[-1].filters
+            else:
+                d_model = audio_cfg.encoder.d_model
             if 'feat_in' in modality_adapter_cfg:  # conformer encoder
-                modality_adapter_cfg.feat_in = audio_cfg.encoder.d_model
+                modality_adapter_cfg.feat_in = d_model
             if 'input_dim' in modality_adapter_cfg:
-                modality_adapter_cfg.input_dim = audio_cfg.encoder.d_model
+                modality_adapter_cfg.input_dim = d_model
             if 'output_dim' in modality_adapter_cfg:
                 modality_adapter_cfg.output_dim = gpt_cfg.hidden_size
 
