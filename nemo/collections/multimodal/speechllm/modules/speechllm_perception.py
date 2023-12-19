@@ -108,6 +108,7 @@ class AudioPerceptionModel(NeuralModule, Exportable):
 
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__()
+        self.cfg = cfg
         if 'adapter' in cfg:
             # Update encoder adapter compatible config
             adapter_metadata = adapter_mixins.get_registered_adapter(cfg.encoder._target_)
@@ -269,6 +270,49 @@ class ConformerMultiLayerFeatureExtractor(NeuralModule, Exportable, AccessMixin)
         self.set_access_enabled(access_enabled=old_access_flag)
 
         return self.aggregator(encoded_list, encoded_len_list)
+
+
+class DebugAudioPerceptionModel(AudioPerceptionModel):
+    """."""
+
+    def forward(
+        self,
+        input_signal=None,
+        input_signal_length=None,
+        processed_signal=None,
+        processed_signal_length=None,
+        *args,
+        **kwargs,
+    ):
+        if self.cfg.test_stage != 1:
+            processed_signal, processed_signal_length = self.maybe_preprocess_audio(
+                input_signal, input_signal_length, processed_signal, processed_signal_length
+            )
+        else:
+            processed_signal_length = input_signal_length // 16000 // 0.01
+            processed_signal = torch.zeros([input_signal_length.shape[0], processed_signal_length, 80])
+
+        # Spec augment is not applied during evaluation/testing
+        if self.spec_augmentation is not None and self.training:
+            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
+
+        if self.cfg.test_stage != 2:
+            encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        else:
+            encoded_len = processed_signal_length // 8
+            encoded = torch.zeros(
+                [processed_signal_length.shape[0], 512, encoded_len[0]], device=processed_signal.device
+            )
+        if self.cfg.test_stage != 3:
+            encoded, encoded_len = self.modality_adapter(audio_signal=encoded, length=encoded_len)
+        else:
+            encoded_len = encoded_len // 4
+            encoded = torch.zeros([encoded_len.shape[0], 512, encoded_len[0]], device=processed_signal.device)
+
+        # b, c, t -> b, t, c
+        encoded = self.proj(encoded.transpose(1, 2))
+
+        return encoded, encoded_len, {}
 
 
 class AmQueryAudioPerceptionModel(AudioPerceptionModel):
