@@ -48,6 +48,7 @@ from typing import Optional, Tuple
 import librosa
 import matplotlib.pylab as plt
 import numpy as np
+import seaborn as sns
 import torch
 from einops import rearrange
 from numba import jit, prange
@@ -139,7 +140,7 @@ def get_mask_from_lengths(lengths: Optional[torch.Tensor] = None, x: Optional[to
 
     Args:
         lengths: Optional[torch.tensor] (torch.tensor): 1D tensor with lengths
-        x: Optional[torch.tensor] = tensor to be used on, last dimension is for mask 
+        x: Optional[torch.tensor] = tensor to be used on, last dimension is for mask
     Returns:
         mask (torch.tensor): num_sequences x max_length binary tensor
     """
@@ -168,7 +169,7 @@ def sort_tensor(
         context: tensor sorted by lens along dimension dim
         lens_sorted: lens tensor, sorted
         ids_sorted: reorder ids to be used to restore original order
-    
+
     """
     lens_sorted, ids_sorted = torch.sort(lens, descending=descending)
     context = torch.index_select(context, dim, ids_sorted)
@@ -177,13 +178,13 @@ def sort_tensor(
 
 def unsort_tensor(ordered: torch.Tensor, indices: torch.Tensor, dim: Optional[int] = 0) -> torch.Tensor:
     """Reverses the result of sort_tensor function:
-       o, _, ids = sort_tensor(x,l) 
+       o, _, ids = sort_tensor(x,l)
        assert unsort_tensor(o,ids) == x
     Args:
         ordered: context tensor, sorted by lengths
         indices: torch.tensor: 1D tensor with 're-order' indices returned by sort_tensor
     Returns:
-        ordered tensor in original order (before calling sort_tensor)  
+        ordered tensor in original order (before calling sort_tensor)
     """
     return torch.index_select(ordered, dim, indices.argsort(0))
 
@@ -411,11 +412,22 @@ def tacotron2_log_to_wandb_func(
             swriter.log({"audios": audios})
 
 
-def plot_alignment_to_numpy(alignment, title='', info=None, phoneme_seq=None, vmin=None, vmax=None):
-    if phoneme_seq:
-        fig, ax = plt.subplots(figsize=(15, 10))
-    else:
-        fig, ax = plt.subplots(figsize=(6, 4))
+def plot_alignment_to_numpy(
+        alignment,
+        title='',
+        info=None,
+        phoneme_seq=None,
+        vmin=None,
+        vmax=None,
+        phoneme_ver=0,
+        phone_offset=2,
+        h_offset=True,
+    ):
+    # if phoneme_seq is not None:
+    #     fig, ax = plt.subplots(figsize=(15, 10))
+    # else:
+    alignment=np.clip(alignment, a_min=0, a_max=None)
+    fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(alignment, aspect='auto', origin='lower', interpolation='none', vmin=vmin, vmax=vmax)
     ax.set_title(title)
     fig.colorbar(im, ax=ax)
@@ -424,14 +436,52 @@ def plot_alignment_to_numpy(alignment, title='', info=None, phoneme_seq=None, vm
         xlabel += '\n\n' + info
     plt.xlabel(xlabel)
     plt.ylabel('Encoder timestep')
+
+    if phoneme_seq is not None:
+        if phoneme_ver == 0:
+            # for debugging of phonemes and durs in maps. Not used by def in training code
+            ax.set_yticks(np.arange(len(phoneme_seq)))
+            ax.set_yticklabels(phoneme_seq)
+            ax.hlines(np.arange(len(phoneme_seq)), xmin=0.0, xmax=max(ax.get_xticks()))
+        elif phoneme_ver == 1:
+            yticks = ax.get_yticks()
+            new_yticks = []
+            for tick in yticks:
+                if tick < 0 or tick > alignment.shape[0]:
+                    continue
+                new_yticks.append(tick)
+            new_yticks += phoneme_seq
+            ax.set_yticks(new_yticks)
+        elif phoneme_ver == 2:
+            # yticks = ax.get_yticks()
+            # new_yticks = []
+            # for tick in yticks:
+            #     new_yticks.append(f"{tick+phoneme_seq[0]:.0f}")
+            # ax.set_yticklabels(new_yticks)
+            phones = phoneme_seq[phone_offset:]
+            ax.set_yticks(np.arange(len(phones)))
+            ax.set_yticklabels(phones)
+            ax.hlines(np.arange(0.5, len(phones)-0.5, 1.), xmin=0., xmax=alignment.shape[1]-0.5, colors="black")
+
+            if h_offset:
+                xticks = ax.get_xticks()
+                new_xticks = []
+                for tick in xticks:
+                    new_xticks.append(f"{tick+phoneme_seq[1]:.0f}")
+                ax.set_xticklabels(new_xticks)
+
     plt.tight_layout()
+    fig.canvas.draw()
+    data = save_figure_to_numpy(fig)
+    plt.close()
+    return data
 
-    if phoneme_seq != None:
-        # for debugging of phonemes and durs in maps. Not used by def in training code
-        ax.set_yticks(np.arange(len(phoneme_seq)))
-        ax.set_yticklabels(phoneme_seq)
-        ax.hlines(np.arange(len(phoneme_seq)), xmin=0.0, xmax=max(ax.get_xticks()))
 
+def plot_encodec_to_numpy(encodec, title=''):
+    fig, ax = plt.subplots(figsize=(10, 3))
+    sns.heatmap(encodec, ax=ax)
+
+    plt.tight_layout()
     fig.canvas.draw()
     data = save_figure_to_numpy(fig)
     plt.close()
@@ -525,6 +575,17 @@ def save_figure_to_numpy(fig):
     # save it to a numpy array.
     data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
     data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    return data
+
+
+def plot_encodec_to_numpy(encodec, title=''):
+    fig, ax = plt.subplots(figsize=(10, 3))
+    sns.heatmap(encodec, ax=ax)
+
+    plt.tight_layout()
+    fig.canvas.draw()
+    data = save_figure_to_numpy(fig)
+    plt.close()
     return data
 
 

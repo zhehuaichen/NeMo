@@ -23,7 +23,7 @@ FROM ${BASE_IMAGE} as nemo-deps
 
 # dependency flags; should be declared after FROM
 # torchaudio: not required by default
-ARG REQUIRE_TORCHAUDIO=false
+ARG REQUIRE_TORCHAUDIO=true
 # k2: not required by default
 ARG REQUIRE_K2=false
 # ais cli: not required by default, install only if required
@@ -110,6 +110,29 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_graphviz.sh --d
   exit ${INSTALL_CODE};  \
   else echo "Skipping failed graphviz installation"; fi \
   else echo "graphviz installed successfully"; fi
+
+# install k2, skip if installation fails
+COPY scripts /tmp/nemo/scripts/
+# RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL_CODE=$?; \
+#   echo ${INSTALL_MSG}; \
+#   if [ ${INSTALL_CODE} -ne 0 ]; then \
+#   echo "k2 installation failed";  \
+#   if [ "${REQUIRE_K2}" = true ]; then \
+#   exit ${INSTALL_CODE};  \
+#   else echo "Skipping failed k2 installation"; fi \
+#   else echo "k2 installed successfully"; fi
+
+# install nemo dependencies
+WORKDIR /tmp/nemo
+ENV LHOTSE_REQUIRE_TORCHAUDIO=0
+COPY requirements .
+RUN for f in $(ls requirements*.txt); do pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
+RUN pip install --no-deps encodec
+
+# install flash attention
+RUN pip install flash-attn
+# install numba for latest containers
+RUN pip install numba>=0.57.1
 
 # install k2, skip if installation fails
 COPY scripts /tmp/nemo/scripts/

@@ -195,6 +195,8 @@ def get_ltor_masks_and_position_ids(
     """Build masks and position id for left to right model."""
 
     # Extract batch size and sequence length.
+    if data.dim() == 3:
+        data = data[:, 0, :]
     micro_batch_size, seq_length = data.size()
 
     # Attention mask (lower triangular).
@@ -266,6 +268,8 @@ def enc_dec_extended_attention_mask(attention_mask_list):
 
 def build_position_ids(token_ids):
     # Create position ids
+    if token_ids.dim() > 2:
+        token_ids = token_ids[:, 0, :]
     seq_length = token_ids.size(1)
     position_ids = torch.arange(seq_length, dtype=torch.long, device=token_ids.device)
     position_ids = position_ids.unsqueeze(0).expand_as(token_ids).clone()
