@@ -24,7 +24,7 @@ from nemo.collections.asr.modules import AudioToMelSpectrogramPreprocessor
 from nemo.collections.tts.parts.utils.helpers import mask_sequence_tensor
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.module import NeuralModule
-from nemo.core.neural_types.elements import AudioSignal, EncodedRepresentation, LengthsType, MelSpectrogramType, VoidType
+from nemo.core.neural_types.elements import AudioSignal, EncodedRepresentation, Index, LengthsType, MelSpectrogramType, VoidType
 from nemo.core.neural_types.neural_type import NeuralType
 
 
@@ -843,3 +843,48 @@ class MultiBandMelEncoder(NeuralModule):
         # [batch_size, num_bands * encoded_dim, time]
         out = torch.cat(outputs, dim=1)
         return out, spec_len
+
+
+from abc import ABC, abstractmethod
+
+class VectorQuantizerBase(NeuralModule, ABC):
+    @property
+    def input_types(self):
+        return {
+            "inputs": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+            "input_len": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        return {
+            "dequantized": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+            "indices": NeuralType(('D', 'B', 'T'), Index()),
+        }
+
+    @typecheck()
+    @abstractmethod
+    def forward(self, inputs: torch.Tensor, input_len: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        pass
+
+    @typecheck(
+        input_types={
+            "inputs": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),
+            "input_len": NeuralType(tuple('B'), LengthsType()),
+        },
+        output_types={"indices": NeuralType(('D', 'B', 'T'), Index())},
+    )
+    @abstractmethod
+    def encode(self, inputs: torch.Tensor, input_len: torch.Tensor) -> torch.Tensor:
+        pass
+
+    @typecheck(
+        input_types={
+            "indices": NeuralType(('D', 'B', 'T'), Index()),
+            "input_len": NeuralType(tuple('B'), LengthsType()),
+        },
+        output_types={"dequantized": NeuralType(('B', 'D', 'T'), EncodedRepresentation()),},
+    )
+    @abstractmethod
+    def decode(self, indices: torch.Tensor, input_len: torch.Tensor) -> torch.Tensor:
+        pass
