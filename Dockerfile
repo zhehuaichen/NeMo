@@ -70,10 +70,10 @@ RUN git clone https://github.com/NVIDIA/Megatron-LM.git && \
   pip install .
 
 # Apex bugfix for PyTorch 23.11 container: https://github.com/NVIDIA/apex/pull/1760
-RUN git clone https://github.com/NVIDIA/apex.git && \
-  cd apex && \
-  git checkout c07a4cf67102b9cd3f97d1ba36690f985bae4227 && \
-  pip install -v --no-build-isolation --disable-pip-version-check --no-cache-dir --config-settings "--build-option=--cpp_ext --cuda_ext --fast_layer_norm --distributed_adam --deprecated_fused_adam" ./
+# RUN git clone https://github.com/NVIDIA/apex.git && \
+#   cd apex && \
+#   git checkout c07a4cf67102b9cd3f97d1ba36690f985bae4227 && \
+#   pip install -v --no-build-isolation --disable-pip-version-check --no-cache-dir --config-settings "--build-option=--cpp_ext --cuda_ext --fast_layer_norm --distributed_adam --deprecated_fused_adam" ./
 
 # Transformer Engine 1.2.0
 RUN git clone https://github.com/NVIDIA/TransformerEngine.git && \
@@ -133,6 +133,7 @@ RUN pip install --no-deps encodec
 RUN pip install flash-attn
 # install numba for latest containers
 RUN pip install numba>=0.57.1
+RUN pip install git+https://github.com/lhotse-speech/lhotse
 
 # install k2, skip if installation fails
 COPY scripts /tmp/nemo/scripts/
@@ -146,16 +147,16 @@ RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/installers/install_k2.sh); INSTALL
   else echo "k2 installed successfully"; fi
 
 # install nemo dependencies
-WORKDIR /tmp/nemo
-ENV LHOTSE_REQUIRE_TORCHAUDIO=0
-COPY requirements .
-RUN for f in $(ls requirements*.txt); do pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
-
-# install flash attention
-RUN pip install flash-attn
-# install numba for latest containers
-RUN pip install numba>=0.57.1
-
+#WORKDIR /tmp/nemo
+#ENV LHOTSE_REQUIRE_TORCHAUDIO=0
+#COPY requirements .
+#RUN for f in $(ls requirements*.txt); do pip3 install --disable-pip-version-check --no-cache-dir -r $f; done
+#
+## install flash attention
+#RUN pip install flash-attn
+## install numba for latest containers
+#RUN pip install numba>=0.57.1
+#
 # copy nemo source into a scratch image
 FROM scratch as nemo-src
 COPY . .
