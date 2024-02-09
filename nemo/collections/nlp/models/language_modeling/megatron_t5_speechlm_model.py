@@ -231,6 +231,18 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         self.predict_step_outputs = []
         self.phoneme_tokenizer = None
 
+    def encode_wav_from_codec_model(self, wav, wav_len):
+        codec_model = self.additional_models['codec']
+        if self.codecmodel_type == 'dac':
+            codes = codec_model.encoder(wav.unsqueeze(0))[0][0]
+        elif self.codecmodel_type == 'encodec':
+            codes = codec_model.encode([[wav.unsqueeze(0), None]])[0, 0]
+        elif self.codecmodel_type == 'nemo_codec':
+            codes, _ = codec_model.encode(audio=wav, audio_len=wav_len)
+        else:
+            raise NotImplementedError()
+        return codes
+
     def decode_wav_from_codec_model(self, codes):
         codec_model = self.additional_models['codec']
         if self.codecmodel_type == 'dac':
@@ -1195,10 +1207,8 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
         with open(os.path.join(self.logger.log_dir, 'output_metrics.json'), 'w') as f:
             json.dump(average_metrics, f)
 
-    def build_virtual_prompt_dataset(
-        self, dataset_paths, batch_size, for_train, drop_last, shuffle, num_workers, pin_memory
-    ):
-        dataset = T5SpeechLMDataset(
+    def get_dataset(self, dataset_paths, for_train):
+        return T5SpeechLMDataset(
             datasets=dataset_paths,
             tokenizer=self.tokenizer,
             sample_rate=self.cfg.data.get('sample_rate', 24000),
@@ -1242,6 +1252,11 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             skip_datasets=self.cfg.data.get('skip_datasets', []),
             english_only_model=self.cfg.get('english_only_model', False),
         )
+
+    def build_virtual_prompt_dataset(
+        self, dataset_paths, batch_size, for_train, drop_last, shuffle, num_workers, pin_memory
+    ):
+        dataset = self.get_dataset(dataset_paths, for_train)
 
         rank = parallel_state.get_data_parallel_rank()
         world_size = parallel_state.get_data_parallel_world_size()
@@ -1325,7 +1340,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
 
         return dataset, dataloader
 
-    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
+    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0, dataset_batch_size: int = 1) -> Any:
         with torch.no_grad():
             (
                 virtual_tokens,
@@ -1527,9 +1542,10 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             wer_score = 0
             audio_to_pred = []
             audio_to_pred_zh = []
+            dataset_batch_size = self.test_dataloader().batch_size if hasattr(self.test_dataloader(), "batch_size") else dataset_batch_size
             for i in range(batch_size):
                 audio_len = (labels[i][0] != 0).sum().item()
-                step = batch_idx * self.test_dataloader().batch_size + i
+                step = batch_idx * dataset_batch_size + i
                 if torch.count_nonzero(speech_mask) > 0:
                     dec_input_to_1024 = self.convert_tokens_to_range(dec_input_raw[i, :, 0:audio_len])
                     dec_input_wav = self.decode_wav_from_codec_model(dec_input_to_1024)
@@ -1661,7 +1677,7 @@ class MegatronT5SpeechLMModel(MegatronBaseSpeechLM):
             # import ipdb; ipdb.set_trace()
             for i in range(0, len(greedy_transcripts)-1, 2):
                 assert all_audio_to_pred[i]["step"] == all_audio_to_pred[i+1]["step"]
-                step = batch_idx * self.test_dataloader().batch_size + all_audio_to_pred[i]["step"]
+                step = batch_idx * dataset_batch_size + all_audio_to_pred[i]["step"]
                 cer_sample = word_error_rate([greedy_transcripts[i]], [greedy_transcripts[i+1]], use_cer=True)
                 wer_sample = word_error_rate([greedy_transcripts[i]], [greedy_transcripts[i+1]], use_cer=False)
                 self.logger.experiment.add_text("Inf Predicted Text", greedy_transcripts[i], step)
