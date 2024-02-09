@@ -365,8 +365,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         logging.info(f"After Process len(self.examples) {len(self.examples)} TTS = {tts} ASR = {asr}")
         logging.info(f'Skipped {skipped} sentences, sequence length too short or too long even after truncation')
 
-    def __getitem__(self, idx):
-        doc = self.examples[idx]
+    def getitem_internal(self, doc):
         taskname = doc["taskname"]
         prompt_template = self.task_templates[taskname]["prompt_template"]
         prompt_template_fields = self.task_templates[taskname]["prompt_template_fields"]
@@ -571,6 +570,9 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             cross_attention_prior,
             lang.value
         )
+    def __getitem__(self, idx):
+        doc = self.examples[idx]
+        return self.getitem_internal(doc)
 
     def _truncate_input_speech(self, context_tokens, question_tokens, virtual_tokens):
         total_len = self._get_len(context_tokens, question_tokens, virtual_tokens)
@@ -784,11 +786,14 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
             field_tokens = [field_tokens]
             # print("AUDIOCODEC", field_tokens.shape)
         elif doc[f"{field}_type"] == 'REFSPEAKERCODEC':
-            reference_codec_paths = field_data.split(";")
-            reference_codec_path = rng.choice(reference_codec_paths)
-            if self.codec_folder is not None:
-                reference_codec_path = self.codec_folder / reference_codec_path
-            field_tokens = torch.load(reference_codec_path).long()
+            if isinstance(field_data, str):
+                reference_codec_paths = field_data.split(";")
+                reference_codec_path = rng.choice(reference_codec_paths)
+                if self.codec_folder is not None:
+                    reference_codec_path = self.codec_folder / reference_codec_path
+                field_tokens = torch.load(reference_codec_path).long()
+            else:
+                field_tokens = field_data
             field_tokens[0] = (field_tokens[0] + self.speech_offset).long()
             _min_len = int(self.context_duration_min * self.codebook_fps)
             _max_len = int(self.context_duration_max * self.codebook_fps)
