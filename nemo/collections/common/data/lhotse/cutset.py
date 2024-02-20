@@ -155,7 +155,7 @@ def read_nemo_manifest(config, is_tarred: bool) -> LhotseCutSet:
                 if "question_file_set" in config
                 else [None for i in range(len(config["manifest_filepath"]))]
             )
-            for manifest_info, tar_path, question_file in zip(
+            for manifest_info, (tar_path,), question_file in zip(
                 config["manifest_filepath"], config["tarred_audio_filepaths"], question_file_set
             ):
                 if len(manifest_info) == 1:
