@@ -14,6 +14,7 @@ except ImportError:
 import soundfile
 
 from nemo.collections.asr.data.audio_to_text import expand_sharded_filepaths as _expand_sharded_filepaths
+from nemo.collections.common.parts.preprocessing.manifest import get_full_path
 
 
 class LazyNeMoIterator(ImitatesDict):
@@ -58,6 +59,12 @@ class LazyNeMoIterator(ImitatesDict):
 
         for data in self.source:
             audio_path = data.pop("audio_filepath")
+            audio_path = get_full_path(str(audio_path), str(self.path))
+            import os
+
+            if not os.path.isfile(audio_path):
+                print(audio_path)
+                raise FileNotFoundError(f"Audio file not found: {audio_path}, manifest: {self.path}")
             duration = data.pop("duration")
             if self.sampling_rate is None:
                 recording = Recording.from_file(audio_path)

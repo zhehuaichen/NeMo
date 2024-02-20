@@ -39,7 +39,8 @@ model:
   seed: 1234
   tensor_model_parallel_size: 1 # intra-layer model parallelism
   pipeline_model_parallel_size: 1 # inter-layer model parallelism
-  
+  pretrained_audio_model: null
+
   global_batch_size: 1
   micro_batch_size: 1
   restore_from_path: ??? # Path to an existing .nemo model you wish to add new tasks to or run inference with

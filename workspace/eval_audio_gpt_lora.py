@@ -16,6 +16,7 @@
 import json
 import os
 
+import torch
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
@@ -79,8 +80,13 @@ def main(cfg) -> None:
         # update the model config of the trained model with params we want to set at inference time.
         peft_model_cfg.precision = cfg.trainer.precision
         peft_model_cfg.data.test_ds = cfg.model.data.test_ds
+        peft_model_cfg.data.test_ds.prompt_template = peft_model_cfg.data.train_ds.prompt_template
+        peft_model_cfg.data.test_ds.separate_prompt_and_response_with_newline = (
+            peft_model_cfg.data.train_ds.separate_prompt_and_response_with_newline
+        )
         peft_model_cfg.activations_checkpoint_granularity = None
         peft_model_cfg.activations_checkpoint_method = None
+        peft_model_cfg.pretrained_audio_model = cfg.model.pretrained_audio_model
         if peft_model_cfg.get("use_flash_attention", False):
             peft_model_cfg.use_flash_attention = cfg.model.use_flash_attention
         if cfg.model.get("seq_len_interpolation_factor", None) is not None:
@@ -117,6 +123,11 @@ def main(cfg) -> None:
         override_config_path=peft_model_cfg,
         save_restore_connector=save_restore_connector,
     )
+
+    states = torch.load(cfg.model.peft.restore_from_path, map_location="cpu")
+    print("Loading state dict from", cfg.model.peft.restore_from_path)
+    model.load_state_dict(states['state_dict'], strict=True)
+
     config = OmegaConf.to_container(cfg.inference, resolve=True)
     model.set_inference_config(config)
     model.freeze()
