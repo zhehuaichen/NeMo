@@ -22,7 +22,7 @@ def read_cutset_from_config(config) -> Tuple[LhotseCutSet, bool]:
         assert (
             config.get("manifest_filepath") is not None
         ), "You must specify either: manifest_filepath, lhotse.cuts_path, or lhotse.shar_path"
-        is_tarred = config.get("tarred_audio_filepaths") is not None
+        is_tarred = config.get("is_tarred", False)
     else:
         is_tarred = config.lhotse.get("shar_path") is not None
     if use_nemo_manifest:

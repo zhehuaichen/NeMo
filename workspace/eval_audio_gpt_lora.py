@@ -124,10 +124,9 @@ def main(cfg) -> None:
         save_restore_connector=save_restore_connector,
     )
 
-    states = torch.load(cfg.model.peft.restore_from_path, map_location="cpu")
-    print("Loading state dict from", cfg.model.peft.restore_from_path)
-    model.load_state_dict(states['state_dict'], strict=True)
+    # states = torch.load(cfg.model.peft.restore_from_path, map_location="cpu")['state_dict']
 
+    # import pdb; pdb.set_trace()
     config = OmegaConf.to_container(cfg.inference, resolve=True)
     model.set_inference_config(config)
     model.freeze()
