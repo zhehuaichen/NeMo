@@ -77,13 +77,27 @@ class LazyNeMoIterator(ImitatesDict):
                     num_samples=compute_num_samples(duration, self.sampling_rate),
                 )
             cut = recording.to_cut()
+            if self.text_field not in data:
+                if "text" in data:
+                    text = data["text"]
+                elif "answer" in data:
+                    text = data["answer"]
+                else:
+                    raise ValueError(
+                        f"Could not find the text field in the manifest. "
+                        f"Expected one of: {self.text_field}, text, answer. "
+                        f"Got: {data.keys()}"
+                    )
+            else:
+                text = data[self.text_field]
+
             cut.supervisions.append(
                 SupervisionSegment(
                     id=cut.id,
                     recording_id=cut.recording_id,
                     start=0,
                     duration=cut.duration,
-                    text=data[self.text_field],
+                    text=text,
                     language=data.get(self.lang_field),
                 )
             )
