@@ -9,6 +9,7 @@ from omegaconf import DictConfig, ListConfig, open_dict
 from nemo.collections.asr.models import ASRModel, EncDecSpeakerLabelModel, SpeechEncDecSelfSupervisedModel
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
 from nemo.collections.multimodal.speechllm.parts.utils.data_utils import align_feat_seq_list, get_nested_dict_value
+from nemo.collections.multimodal.speechllm.modules.modality_adapters import PoolingMLPConnectors
 from nemo.core.classes import Exportable, NeuralModule
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.mixins import AccessMixin
@@ -87,6 +88,9 @@ class WhisperPerceptionModel(NeuralModule, Exportable):
             self.modality_adapter = PromptAdapter(cfg, whisper_config=whisper_model.config)
         elif self.mode.startswith("qformer_"):
             self.modality_adapter = QformerAdapter(cfg, whisper_config=whisper_model.config)
+        elif self.mode.startswith("mlp"):
+            pooling_factor = cfg.perception.get("pooling_factor", 30)
+            self.modality_adapter = PoolingMLPConnectors(input_dim=whisper_model.config.d_model, hidden_dim=whisper_model.config.d_model, pooling_factor=pooling_factor, output_dim=cfg.hidden_size, pooling='cat')
         else:
             raise NotImplementedError("mode not implemented")
 
@@ -203,6 +207,10 @@ class WhisperPerceptionModel(NeuralModule, Exportable):
                     layer_prompt_output = qformer_output.last_hidden_state # (b, prompt_size, d_model)
                     layer_prompt_outputs.append(layer_prompt_output) # list of (b, prompt_size, d_model)
 
+        elif self.mode == "mlp":
+            encoded = self.encoder(input_features)
+            encoded, _ = self.modality_adapter(audio_signal=encoded.last_hidden_state.transpose(1, 2), length=features_length)
+            return encoded.transpose(1, 2)
         else:
             raise NotImplementedError(f"mode {self.mode} not implemented")
 
