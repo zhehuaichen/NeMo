@@ -1451,6 +1451,7 @@ def get_tarred_aqa_dataset_from_config(
     answer_only_loss: bool = True,
     virtual_tokens: int = 0,
 ):
+    logging.info(f"Creating tarred dataset from config: {config}")
     is_concat = config.get('is_concat', False)
     if is_concat:
         if 'concat_sampling_technique' in config and config['concat_sampling_technique'] is None:
