@@ -1422,6 +1422,7 @@ def get_concat_tarred_aqa_dataset(
             answer_only_loss=answer_only_loss,
             virtual_tokens=virtual_tokens,
         )
+        datasets.append(dataset)
 
     concat_sampling_probabilities = config.get('concat_sampling_probabilities', None)
     if not isinstance(concat_sampling_probabilities, ListConfig) or len(concat_sampling_probabilities) != len(
