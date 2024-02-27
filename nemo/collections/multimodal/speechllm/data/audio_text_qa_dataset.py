@@ -1406,8 +1406,11 @@ def get_concat_tarred_aqa_dataset(
         conf = copy.deepcopy(config)
         conf['manifest_filepath'] = manifest_filepath
         conf['tarred_audio_filepaths'] = tarred_audio_filepath
-        question_file_set = config.get('question_file_set', None)
-        conf['question_file_set'] = [question_file_set[dataset_idx]]
+        question_files = config.get('question_file', None)
+        if isinstance(question_files, ListConfig) and len(question_files) == len(manifest_filepaths):
+            conf['question_file'] = question_files[dataset_idx]
+        else:
+            conf['question_file'] = question_files
         dataset = get_tarred_aqa_dataset(
             config=conf,
             tokenizer=tokenizer,
@@ -1419,7 +1422,6 @@ def get_concat_tarred_aqa_dataset(
             answer_only_loss=answer_only_loss,
             virtual_tokens=virtual_tokens,
         )
-        datasets.append(dataset)
 
     concat_sampling_probabilities = config.get('concat_sampling_probabilities', None)
     if not isinstance(concat_sampling_probabilities, ListConfig) or len(concat_sampling_probabilities) != len(
