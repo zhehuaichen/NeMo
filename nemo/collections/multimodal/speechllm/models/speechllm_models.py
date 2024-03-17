@@ -86,6 +86,17 @@ default_inference_config = {'tokens_to_generate': 30}
 class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
     """Modularized speech GPT model."""
 
+    def setup_perception_modules(self, cfg):
+        if 'target' in cfg.perception:
+            imported_cls = model_utils.import_class_by_path(cfg.perception.target)
+            pretrained_audio_model = cfg.pretrained_canary_model if hasattr(cfg, "pretrained_canary_model") else cfg.pretrained_audio_model
+            self.perception = imported_cls(
+                cfg=cfg.perception, pretrained_audio_model=pretrained_audio_model, llm_tokenizer=self.tokenizer
+            )
+        else:
+            imported_cls = AudioPerceptionModel
+            self.perception = imported_cls(cfg=cfg.perception)
+
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
         super().__init__(cfg, trainer)
@@ -94,15 +105,8 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             self.test_metric_label_key = self.cfg.data.test_ds.metric.get('label_key', 'labels')
         if hasattr(self.cfg.data, "validation_ds") and hasattr(self.cfg.data.validation_ds, "metric"):
             self.val_metric_label_key = self.cfg.data.validation_ds.metric.get('label_key', 'labels')
-        if 'target' in cfg.perception:
-            imported_cls = model_utils.import_class_by_path(cfg.perception.target)
-            self.perception = imported_cls(
-                cfg=cfg.perception, pretrained_audio_model=cfg.pretrained_audio_model, llm_tokenizer=self.tokenizer
-            )
-        else:
-            imported_cls = AudioPerceptionModel
-            self.perception = imported_cls(cfg=cfg.perception)
 
+        self.setup_perception_modules(cfg)
         self.setup_optimizer_param_groups()
         # self.configure_optimizers()
         self.summarize(max_depth=3)
@@ -137,10 +141,23 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
         # self.unfreeze()
         known_groups = []
         freeze_llm = self.cfg.get('freeze_llm', True)
+        unfreeze_emb = self.cfg.get('unfreeze_emb', False)
         if freeze_llm:
-            known_groups.append('model.')
+            if unfreeze_emb:
+                known_groups.append('model.decoder.')
+            else:
+                known_groups.append('model.')
+
         for param in self.model.parameters():
             param.requires_grad = not freeze_llm
+        if freeze_llm and unfreeze_emb:
+            for param in self.model.embedding.parameters():
+                param.requires_grad = True
+            for param in self.model.output_layer.parameters():
+                param.requires_grad = True
+            for param in self.model.rotary_pos_emb.parameters():
+                param.requires_grad = True
+
 
         if self.cfg.get('freeze_audio_encoder', False):
             if self.cfg.perception.get("speaker_model", None) is not None:
@@ -169,34 +186,38 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
                 module.set_enabled_adapters(enabled=True)
                 module.unfreeze_enabled_adapters()  # selectively unfreeze the adapter modules.
                 opt_params += [p for p in module.parameters()]
+        if (not self.cfg.get('freeze_llm', True)) and (not self.cfg.get('freeze_modality_adapter', False)) and (not self.cfg.get('freeze_audio_encoder', False)):
+            from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+            super(MegatronGPTModel, self).setup_optimizer_param_groups()
+        else:
+            param_groups = []
+            if "optim_param_groups" in self.cfg:
+                param_groups_cfg = self.cfg.optim_param_groups
+                for group, group_cfg in param_groups_cfg.items():
+                    module = getattr(self, group, None)
+                    if module is None:
+                        raise ValueError(f"{group} not found in model.")
+                    elif hasattr(module, "parameters"):
+                        known_groups.append(f"{group}.")
+                        new_group = {"params": module.parameters()}
+                        for k, v in group_cfg.items():
+                            new_group[k] = v
+                        param_groups.append(new_group)
+                    else:
+                        raise ValueError(f"{group} does not have parameters.")
 
-        param_groups = []
-        if "optim_param_groups" in self.cfg:
-            param_groups_cfg = self.cfg.optim_param_groups
-            for group, group_cfg in param_groups_cfg.items():
-                module = getattr(self, group, None)
-                if module is None:
-                    raise ValueError(f"{group} not found in model.")
-                elif hasattr(module, "parameters"):
-                    known_groups.append(f"{group}.")
-                    new_group = {"params": module.parameters()}
-                    for k, v in group_cfg.items():
-                        new_group[k] = v
-                    param_groups.append(new_group)
-                else:
-                    raise ValueError(f"{group} does not have parameters.")
+            for n, p in self.named_parameters():
+                is_unknown = True
+                for group in known_groups:
+                    if n.startswith(group):
+                        is_unknown = False
+                if is_unknown:
+                    opt_params.append(p)
 
-        for n, p in self.named_parameters():
-            is_unknown = True
-            for group in known_groups:
-                if n.startswith(group):
-                    is_unknown = False
-            if is_unknown:
-                opt_params.append(p)
+            param_groups = [{"params": opt_params}] + param_groups
 
-        param_groups = [{"params": opt_params}] + param_groups
+            self._optimizer_param_groups = param_groups
 
-        self._optimizer_param_groups = param_groups
         logging.info(f"Optimizer groups set:\n{self.summarize(max_depth=2)}")
 
     def _create_attention_mask(self, encoder_input: torch.Tensor):
@@ -283,10 +304,9 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
         )
 
         input_embeds = lm_embedding.word_embeddings(input_ids)
-        if self.cfg.data.train_ds.get('add_bos', False):
-            encoded = torch.concat([input_embeds[:, :1], encoded], axis=1)
-
         if isinstance(encoded, torch.Tensor):
+            if self.cfg.data.train_ds.get('add_bos', False):
+                encoded = torch.concat([input_embeds[:, :1], encoded], axis=1)
             # single audio
             encoder_input, encoder_length = self._concat_features(encoded, encoded_len, input_embeds, input_length)
         else:
@@ -625,7 +645,9 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
                 canary_processor=canary_processer,
                 context_len_for_AR_decoding=context_len_for_AR_decoding,
                 convert_canary_prompt_to_text=data_cfg.get('convert_canary_prompt_to_text', False),
+                prepend_to_exist_question=data_cfg.get('prepend_to_exist_question', None),
                 canary_tokens_augment_ratio=data_cfg.get('canary_tokens_augment_ratio', 0.0),
+                random_context_prob=data_cfg.get('random_context_prob', 0.0),
             )
 
         if data_cfg.get('is_tarred', False):
@@ -770,10 +792,22 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
         OmegaConf.set_struct(gpt_cfg, True)
         OmegaConf.resolve(cfg)
         with open_dict(gpt_cfg):
+            override_vocab_size = cfg.model.get('override_vocab_size', None)
+            if override_vocab_size is not None:
+                gpt_cfg.override_vocab_size = override_vocab_size
+            # This is needed when modifying a hparam file directly to load `.ckpt` files.
+            # This is not needed to modify the cfg in `.nemo` files.
+            if hasattr(cfg.model, 'override'):
+                gpt_cfg.hidden_size = cfg.model.override.get('hidden_size', gpt_cfg.hidden_size)
+                gpt_cfg.ffn_hidden_size = cfg.model.override.get('ffn_hidden_size', gpt_cfg.ffn_hidden_size)
+                gpt_cfg.num_layers = cfg.model.override.get('num_layers', gpt_cfg.num_layers)
+                
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
             gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
+            gpt_cfg.unfreeze_emb = cfg.model.get('unfreeze_emb', False)
             gpt_cfg.text_loss_weight = cfg.model.get('text_loss_weight', 1.0)
             gpt_cfg.freeze_audio_encoder = cfg.model.get('freeze_audio_encoder', False)
+            gpt_cfg.load_audio_encoder = cfg.model.get('load_audio_encoder', True)
             gpt_cfg.freeze_modality_adapter = cfg.model.get('freeze_modality_adapter', False)
             gpt_cfg.megatron_amp_O2 = cfg.model.get('megatron_amp_O2', False)
             gpt_cfg.micro_batch_size = cfg.model.data.train_ds.micro_batch_size
@@ -787,6 +821,9 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             gpt_cfg.activations_checkpoint_method = cfg.model.get("activations_checkpoint_method", None)
             gpt_cfg.data = cfg.model.data
             gpt_cfg.optim = cfg.model.optim
+            optim_param_groups = cfg.model.get("optim_param_groups", None)
+            if optim_param_groups is not None:
+                gpt_cfg.optim_param_groups = optim_param_groups
             gpt_cfg.precision = cfg.trainer.precision
             gpt_cfg.answer_only_loss = cfg.model.answer_only_loss
             gpt_cfg.restore_from_path = cfg.model.restore_from_path
@@ -801,13 +838,11 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
             gpt_cfg.perception = cfg.model.perception
             gpt_cfg.pretrained_audio_model = cfg.model.get('pretrained_audio_model', None)
+            pretrained_canary_model = cfg.model.get("pretrained_canary_model", None)
+            if pretrained_canary_model is not None:
+                gpt_cfg.pretrained_canary_model = pretrained_canary_model
             cls._modify_audio_encoder_config(gpt_cfg, audio_cfg, speaker_cfg)
 
-            override_vocab_size = cfg.model.get('override_vocab_size', None)
-            if override_vocab_size is not None:
-                gpt_cfg.override_vocab_size = override_vocab_size
-            # This is needed when modifying a hparam file directly to load `.ckpt` files.
-            # This is not needed to modify the cfg in `.nemo` files.
             if add_cfg_to_tree:
                 OmegaConf.resolve(gpt_cfg)
                 gpt_cfg.cfg = gpt_cfg
@@ -890,14 +925,18 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
     ):
         # keep the tokenizer
         # TODO: decide a way to load tokenizer for inference
-        model.perception.tokenizer = audio_model.tokenizer
+        if not hasattr(cfg.model, "pretrained_canary_model"):
+            # the tokenizer comes from canary if pretrained encoder and canary
+            # has different tokenizers
+            model.perception.tokenizer = audio_model.tokenizer
         use_multi_encoder = cfg.model.perception.get("encoders", None) is not None
         strict = 'overwrite_cfgs' not in cfg.model.perception and 'adapter' not in cfg.model.perception
         if not use_multi_encoder:
-            if cfg.model.perception.get("use_multi_layer_feat", False):
-                model.perception.encoder.encoder.load_state_dict(audio_model.encoder.state_dict(), strict=strict)
-            else:
-                model.perception.encoder.load_state_dict(audio_model.encoder.state_dict(), strict=strict)
+            if cfg.model.load_audio_encoder:
+                if cfg.model.perception.get("use_multi_layer_feat", False):
+                    model.perception.encoder.encoder.load_state_dict(audio_model.encoder.state_dict(), strict=strict)
+                else:
+                    model.perception.encoder.load_state_dict(audio_model.encoder.state_dict(), strict=strict)
             logging.info(f'Loaded pretrained audio model weights from {cfg.model.pretrained_audio_model}')
             if cfg.model.get('use_am_tokenizer', False):
                 model.tokenizer = audio_model.tokenizer
@@ -905,14 +944,15 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             return model
         else:
             for key, enc_cfg in cfg.model.perception.encoders.items():
-                if enc_cfg.get("use_multi_layer_feat", False):
-                    model.perception.encoders[key].encoder.load_state_dict(
-                        audio_model[key].encoder.state_dict(), strict=strict
-                    )
-                else:
-                    model.perception.encoders[key].load_state_dict(
-                        audio_model[key].encoder.state_dict(), strict=strict
-                    )
+                if cfg.model.load_audio_encoder:
+                    if enc_cfg.get("use_multi_layer_feat", False):
+                        model.perception.encoders[key].encoder.load_state_dict(
+                            audio_model[key].encoder.state_dict(), strict=strict
+                        )
+                    else:
+                        model.perception.encoders[key].load_state_dict(
+                            audio_model[key].encoder.state_dict(), strict=strict
+                        )
                 logging.info(f'Loaded pretrained audio model weights for {key}')
             if speaker_model is not None:
                 model.perception.speaker_model.load_state_dict(speaker_model.state_dict(), strict=strict)
@@ -956,13 +996,23 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
             save_restore_connector.model_extracted_dir = cfg.model.restore_from_path
 
         # load llm
-        model = cls.restore_from(
-            restore_path=cfg.model.restore_from_path,
-            trainer=trainer,
-            override_config_path=model_cfg,
-            save_restore_connector=save_restore_connector,
-            strict=False,
-        )
+        if not hasattr(cfg.model, 'override'):
+            model = cls.restore_from(
+                restore_path=cfg.model.restore_from_path,
+                trainer=trainer,
+                override_config_path=model_cfg,
+                save_restore_connector=save_restore_connector,
+                strict=False,
+            )
+        else:
+            import tempfile
+            # unpack nemo ckpt is necessary to load tokenizer
+            with tempfile.TemporaryDirectory() as tmpdir:
+                save_restore_connector._unpack_nemo_file(
+                        path2file=cfg.model.restore_from_path, out_folder=tmpdir, extract_config_only=False
+                    )
+                cls._set_model_restore_state(is_being_restored=True, folder=tmpdir)
+                model = cls(cfg=model_cfg, trainer=trainer)
         # load audio model weights
         model = cls._load_pretrained_audio_weights(cfg, model, audio_model, speaker_model)
 
@@ -1007,14 +1057,6 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
         if self.setup_complete:
             super(MegatronGPTSFTModel, self).load_state_dict(state_dict, strict=False)
         else:
-            if self.cfg.get('override_vocab_size', False):
-                exclude_list = [
-                    "model.language_model.embedding.word_embeddings.weight",
-                    "model.language_model.output_layer.weight",
-                ]
-            else:
-                exclude_list = []
-            state_dict = {k: v for k, v in state_dict.items() if k not in exclude_list}
             super(MegatronGPTSFTModel, self).load_state_dict(state_dict, strict=strict)
 
     def on_load_checkpoint(self, checkpoint) -> None:
@@ -1121,17 +1163,21 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
 
         output = self.predict_step(batch, batch_idx, dataloader_idx)
 
-        inputs_text = [self.tokenizer.ids_to_text(c.tolist()) for c in batch['contexts']]
-        labels_text = [self.tokenizer.ids_to_text(a.tolist()) for a in batch['answers']]
+        inputs_text = [self.tokenizer.ids_to_text(c.tolist()).replace("<|endoftext|>","") for c in batch['contexts']]
+        labels_text = [self.tokenizer.ids_to_text(a.tolist()).replace("<|endoftext|>","") for a in batch['answers']]
         preds_text = [
-            self.tokenizer.ids_to_text(t[l.item() :][: data_cfg.get('tokens_to_generate')])
+            self.tokenizer.ids_to_text(t[l.item() :][: data_cfg.get('tokens_to_generate')]).replace("<|endoftext|>","")
             for t, l in zip(output['token_ids'], batch['context_lengths'])
         ]
 
         if data_cfg.get("end_string", None):
             # sometimes data_cfg.end_string != self.tokenizer.ids_to_text(self.tokenizer.text_to_ids(data_cfg.end_string))
             # for example when data_cfg.end_string = "<end>", the end_string_re will start with " ?? "
-            end_string_re = self.tokenizer.ids_to_text(self.tokenizer.text_to_ids(data_cfg.end_string))
+            from nemo.collections.common.tokenizers.aggregate_tokenizer import AggregateTokenizer
+            if isinstance(self.tokenizer, AggregateTokenizer):
+                end_string_re = self.tokenizer.ids_to_text(self.tokenizer.text_to_ids(data_cfg.end_string, 'en'))
+            else:
+                end_string_re = self.tokenizer.ids_to_text(self.tokenizer.text_to_ids(data_cfg.end_string))
             preds_text_cleaned = []
             labels_text_cleaned = []
             for p, l in zip(preds_text, labels_text):
@@ -1474,3 +1520,137 @@ class ModularAudioGPTLoRAModel(MegatronGPTLoRAModel):
     #      """
     #     checkpoint_state_dict = checkpoint['state_dict']
     #     self.load_state_dict(checkpoint_state_dict, strict=False)
+
+
+class CrossAttendModularAudioGPTLoRAModel(ModularAudioGPTLoRAModel):
+    """Modularized speech GPT model."""
+
+    def prepare_llm_input(self, audio_batch):
+
+        input_signal = audio_batch['audio_signal']
+        input_signal_length = audio_batch['audio_signal_length']
+
+        input_ids, input_length, labels, loss_mask = (
+            audio_batch['tokens'],
+            audio_batch['tokens_length'],
+            audio_batch['labels'],
+            audio_batch['loss_mask'],
+        )
+
+        num_audios = audio_batch.get("num_audios", None)
+        if num_audios is not None:
+            raise ValueError("num_audios is not supported.")
+
+        if self.cfg.get('megatron_amp_O2', False):
+            base_module = self.model.module
+        else:
+            base_module = self.model
+        lm_embedding = (
+            base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
+        )
+        # [b, t, c]
+        encoded, encoded_len, aux_loss = self.perception(
+            input_signal=input_signal,
+            input_signal_length=input_signal_length,
+            processed_signal=None,
+            processed_signal_length=None,
+            lm_embedding=lm_embedding,
+            canary_tokens=audio_batch.get('canary_tokens', None),
+        )
+        input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
+        encoder_input, extra_outputs = self.perception_cross_attn(encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True)
+        if 'audio_ratio' in audio_batch:
+            audio_ratio = audio_batch['audio_ratio'][..., None, None]
+            encoder_input = encoder_input * audio_ratio + input_embeds * (1 - audio_ratio)
+        if 'alpha_xattn' in extra_outputs:
+            alpha_xattn = extra_outputs['alpha_xattn']
+            self.log(
+                'alpha_xattn',
+                alpha_xattn.mean(),
+                prog_bar=True,
+                batch_size=1,
+                rank_zero_only=True,
+            )
+        attention_mask = self._create_attention_mask(encoder_input)
+
+        if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
+            encoder_input = encoder_input.transpose(0, 1).contiguous()
+        if self.cfg.get("sequence_parallel", False):
+            encoder_input = tensor_parallel.mappings.scatter_to_sequence_parallel_region(encoder_input)
+        return encoder_input, attention_mask, labels, loss_mask, (encoded, encoded_len, extra_outputs), aux_loss
+
+    def setup_perception_modules(self, cfg):
+        super().setup_perception_modules(cfg)
+        imported_cls = model_utils.import_class_by_path(cfg.perception.xattn.target)
+        self.perception_cross_attn = imported_cls(cfg=cfg.perception)
+
+    def state_dict(self, destination=None, prefix=None, keep_vars=False):
+        if self.setup_complete:
+            return_state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+            state_dict = self.perception_cross_attn.state_dict(prefix="perception_cross_attn.")
+            return_state_dict.update(state_dict)
+            return return_state_dict
+        else:
+            return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+
+class PseudoCrossAttendModularAudioGPTLoRAModel(CrossAttendModularAudioGPTLoRAModel):
+    """Modularized speech GPT model."""
+
+    def prepare_llm_input(self, audio_batch):
+
+        input_signal = audio_batch['audio_signal']
+        input_signal_length = audio_batch['audio_signal_length']
+
+        input_ids, input_length, labels, loss_mask = (
+            audio_batch['tokens'],
+            audio_batch['tokens_length'],
+            audio_batch['labels'],
+            audio_batch['loss_mask'],
+        )
+
+        num_audios = audio_batch.get("num_audios", None)
+        if num_audios is not None:
+            raise ValueError("num_audios is not supported.")
+
+        if self.cfg.get('megatron_amp_O2', False):
+            base_module = self.model.module
+        else:
+            base_module = self.model
+        lm_embedding = (
+            base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
+        )
+        assert self.perception.cfg.combine_return == False
+        # [b, t, c]
+        (encoded, encoded_len), (llm_encoded, llm_encoded_len), aux_loss = self.perception(
+            input_signal=input_signal,
+            input_signal_length=input_signal_length,
+            processed_signal=None,
+            processed_signal_length=None,
+            lm_embedding=lm_embedding,
+            canary_tokens=audio_batch.get('canary_tokens', None),
+        )
+        input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
+        # concat llm_encoded and input_embeds
+        concat_input_embeds, concat_input_length = self._concat_features(llm_encoded, llm_encoded_len, input_embeds, input_length)
+        if labels is not None:
+            labels = self._shift_labels_by_emb_len(labels, input_length, llm_encoded_len, concat_input_embeds.shape[1], pad_token=0)
+        if loss_mask is not None:
+            loss_mask = self._shift_labels_by_emb_len(
+                loss_mask, input_length, llm_encoded_len, concat_input_embeds.shape[1], pad_token=0)
+        encoder_input, extra_outputs = self.perception_cross_attn(encoded, encoded_len, concat_input_embeds)
+        alpha_xattn = extra_outputs['alpha_xattn']
+        self.log(
+            'alpha_xattn',
+            alpha_xattn.mean(),
+            prog_bar=True,
+            batch_size=1,
+            rank_zero_only=True,
+        )
+        attention_mask = self._create_attention_mask(encoder_input)
+
+        if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
+            encoder_input = encoder_input.transpose(0, 1).contiguous()
+        if self.cfg.get("sequence_parallel", False):
+            encoder_input = tensor_parallel.mappings.scatter_to_sequence_parallel_region(encoder_input)
+        return encoder_input, attention_mask, labels, loss_mask, (encoded, encoded_len, llm_encoded_len, extra_outputs), aux_loss

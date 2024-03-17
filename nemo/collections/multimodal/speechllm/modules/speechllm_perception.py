@@ -38,6 +38,9 @@ from nemo.core.classes.common import typecheck
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.neural_types import AcousticEncodedRepresentation, AudioSignal, LengthsType, NeuralType, SpectrogramType
 from nemo.utils import logging
+from nemo.collections.asr.modules.transformer.transformer_modules import MultiHeadAttention, PositionWiseFF
+from nemo.collections.common.parts import form_attention_mask
+from nemo.collections.nlp.modules.common.transformer.transformer_decoders import TransformerDecoder
 
 __all__ = ["AudioPerceptionModel", "MultiAudioPerceptionModel"]
 
@@ -116,6 +119,7 @@ class AudioPerceptionModel(NeuralModule, Exportable):
 
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__()
+        self.cfg = cfg
         if 'adapter' in cfg:
             # Update encoder adapter compatible config
             adapter_metadata = adapter_mixins.get_registered_adapter(cfg.encoder._target_)
@@ -159,7 +163,12 @@ class AudioPerceptionModel(NeuralModule, Exportable):
         else:
             self.proj = nn.Identity()
         self.setup_adapter(cfg, self.encoder)
-        asr_model = ASRModel.restore_from(kwargs["pretrained_audio_model"], map_location='cpu')
+        # the following caused problems on tensor parallelism in init
+        pretrained_audio_model = kwargs["pretrained_audio_model"]
+        if pretrained_audio_model.endswith('.nemo'):
+            asr_model = ASRModel.restore_from(pretrained_audio_model, map_location='cpu')
+        else:
+            asr_model = ASRModel.from_pretrained(pretrained_audio_model, map_location='cpu')
         self.tokenizer = asr_model.tokenizer
 
     def maybe_preprocess_audio(
@@ -506,6 +515,7 @@ class AmQueryAudioPerceptionModel(AudioPerceptionModel):
 
     def __init__(self, cfg: DictConfig, pretrained_audio_model: str, llm_tokenizer):
         super(AudioPerceptionModel, self).__init__()
+        self.cfg = cfg
         if pretrained_audio_model.endswith('.nemo'):
             logging.info(f'Loading pretrained audio model from local file: {pretrained_audio_model}')
             self.asr_model = ASRModel.restore_from(pretrained_audio_model, map_location='cpu')
@@ -569,7 +579,6 @@ class AmQueryAudioPerceptionModel(AudioPerceptionModel):
             precision=32,
         )
         self.llm_tokenizer = llm_tokenizer
-        self.cfg = cfg
         if self.cfg.get('learnable_combine', False):
             self.lm_attention_ratio = nn.Parameter(torch.tensor(0.5))
         if self.cfg.get('consistency_loss_weight', 0.0) > 0.0:
@@ -704,7 +713,7 @@ class AmQueryAudioPerceptionModel(AudioPerceptionModel):
             am_encoded_asr = am_encoded
         am_hyps_text, log_probs = self.get_am_text_output(am_encoded_asr, am_encoded_len, canary_tokens=canary_tokens)
         llm_encoded, llm_encoded_len = self.get_text_embed(am_hyps_text, lm_embedding, pad_id=pad_id)
-        attend_encoded, encoded_len, aux_loss = self.cross_attend(encoded, encoded_len, llm_encoded, llm_encoded_len)
+        attend_encoded, attend_encoded_len, aux_loss = self.cross_attend(encoded, encoded_len, llm_encoded, llm_encoded_len)
 
         asr_loss_weight = self.cfg.get('asr_loss_weight', 0.0)
         if labels is not None and asr_loss_weight > 0.0:
@@ -721,7 +730,10 @@ class AmQueryAudioPerceptionModel(AudioPerceptionModel):
                 log_probs=log_probs, targets=transcript, input_lengths=am_encoded_len, target_lengths=transcript_len
             )
             aux_loss['asr_loss'] = asr_loss * asr_loss_weight
-        return attend_encoded, encoded_len, aux_loss
+        if self.cfg.get('combine_return', True):
+            return attend_encoded, attend_encoded_len, aux_loss
+        else:
+            return (encoded, encoded_len), (llm_encoded, llm_encoded_len), aux_loss
 
 
 class LmQueryAudioPerceptionModel(AmQueryAudioPerceptionModel):
@@ -751,6 +763,7 @@ class AmAdaptQueryAudioPerceptionModel(AmQueryAudioPerceptionModel):
 
     def __init__(self, cfg: DictConfig, pretrained_audio_model: str, llm_tokenizer):
         super(AudioPerceptionModel, self).__init__()
+        self.cfg = cfg
         if 'adapter' in cfg:
             # Update encoder adapter compatible config
             model_cfg = ASRModel.from_pretrained(pretrained_audio_model, return_config=True)
@@ -799,7 +812,6 @@ class AmAdaptQueryAudioPerceptionModel(AmQueryAudioPerceptionModel):
             precision=32,
         )
         self.llm_tokenizer = llm_tokenizer
-        self.cfg = cfg
         if self.cfg.get('learnable_combine', False):
             self.lm_attention_ratio = nn.Parameter(torch.tensor(0.5))
         if self.cfg.get('consistency_loss_weight', 0.0) > 0.0:
@@ -891,3 +903,199 @@ class AmFixQueryAudioPerceptionModel(AmQueryAudioPerceptionModel):
             )
             aux_loss['asr_loss'] = asr_loss * asr_loss_weight
         return attend_encoded, encoded_len, aux_loss
+
+
+class GatedCrossAttentionDense(NeuralModule, Exportable):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__()
+        self.cfg = cfg
+        cross_attn_cfg= cfg.xattn
+        self.xattn = MultiHeadAttention(
+            cfg.output_dim, cross_attn_cfg.num_attention_heads, cross_attn_cfg.attn_score_dropout, cross_attn_cfg.attn_layer_dropout
+        )
+        self.ffw = PositionWiseFF(cfg.output_dim, 4*cfg.output_dim, cross_attn_cfg.ffn_dropout, cross_attn_cfg.hidden_act)
+        self.alpha_xattn = nn.Parameter(torch.tensor([0.]))
+        self.alpha_dense = nn.Parameter(torch.tensor([0.]))
+        self.layer_norm = nn.LayerNorm(cfg.output_dim, eps=1e-5)
+
+
+    def forward(self, encoder_states, encoded_len, input_embeds, *args, **kwargs):
+        assert input_embeds.shape[-1] == encoder_states.shape[-1]
+        input_embeds_norm = self.layer_norm(input_embeds)
+        # follow EncDecTransfModelBPE - TransformerDecoder to use full ctx for now
+        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+        enc_mask = form_attention_mask(enc_mask)
+        attn_out = self.xattn(input_embeds_norm, encoder_states, encoder_states, enc_mask)
+        alpha_xattn = torch.tanh(self.alpha_xattn)
+        y = input_embeds + alpha_xattn * attn_out
+        y = y + torch.tanh(self.alpha_dense) * self.ffw(y)
+        assert y.shape == input_embeds.shape
+        return y, {'alpha_xattn':alpha_xattn}
+
+
+class CrossAttentionDense(GatedCrossAttentionDense):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__(cfg, args, kwargs)
+        self.alpha_xattn = nn.Parameter(torch.tensor([1.]))
+
+
+class CrossAttention(CrossAttentionDense):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__(cfg, args, kwargs)
+        self.alpha_dense.requires_grad = False
+
+
+class PerStepGatedCrossAttentionDense(GatedCrossAttentionDense):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__(cfg, args, kwargs)
+        del self.alpha_xattn
+        self.alpha_xattn_proj = nn.Linear(cfg.output_dim, 1)
+
+    def forward(self, encoder_states, encoded_len, input_embeds, *args, **kwargs):
+        assert input_embeds.shape[-1] == encoder_states.shape[-1]
+        input_embeds_norm = self.layer_norm(input_embeds)
+        # follow EncDecTransfModelBPE - TransformerDecoder to use full ctx for now
+        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+        enc_mask = form_attention_mask(enc_mask)
+        attn_out = self.xattn(input_embeds_norm, encoder_states, encoder_states, enc_mask)
+        alpha_xattn = self.alpha_xattn_proj(input_embeds_norm)
+        alpha_xattn = torch.sigmoid(alpha_xattn)
+        y = input_embeds + alpha_xattn * attn_out
+        y = y + torch.tanh(self.alpha_dense) * self.ffw(y)
+        assert y.shape == input_embeds.shape
+        return y, {'alpha_xattn':alpha_xattn}
+
+
+class RnnGatedCrossAttention(GatedCrossAttentionDense):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__(cfg, args, kwargs)
+        del self.alpha_xattn
+        del self.layer_norm
+        self.alpha_xattn_proj = nn.Linear(cfg.output_dim, 1)
+        input_rnn_hidden_size = cfg.xattn.get('input_rnn_hidden_size', 512)
+        input_rnn_num_layers= cfg.xattn.get('input_rnn_num_layers', 2)
+        self.input_rnn = nn.GRU(cfg.output_dim, input_rnn_hidden_size, num_layers=input_rnn_num_layers, batch_first=True, bidirectional=False)
+        self.input_proj= nn.Linear(input_rnn_hidden_size, cfg.output_dim)
+        if cfg.xattn.get('include_ffw', False):
+            self.alpha_dense = nn.Parameter(torch.tensor([1.]))
+        else:
+            del self.ffw
+            del self.alpha_dense
+        
+
+    def forward(self, encoder_states, encoded_len, input_embeds, input_embeds_hidden = None, *args, **kwargs):
+        assert input_embeds.shape[-1] == encoder_states.shape[-1]
+        # follow EncDecTransfModelBPE - TransformerDecoder to use full ctx for now
+        input_embeds_rnn, input_embeds_rnn_hidden = self.input_rnn(input_embeds, input_embeds_hidden)
+        input_embeds_rnn = self.input_proj(input_embeds_rnn)
+        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+        enc_mask = form_attention_mask(enc_mask)
+        attn_out = self.xattn(input_embeds_rnn, encoder_states, encoder_states, enc_mask)
+        alpha_xattn = self.alpha_xattn_proj(input_embeds_rnn)
+        alpha_xattn = torch.sigmoid(alpha_xattn)
+        y = input_embeds + alpha_xattn * attn_out
+        if self.cfg.xattn.get('include_ffw', False):
+            y = y + torch.tanh(self.alpha_dense) * self.ffw(y)
+        assert y.shape == input_embeds.shape
+        return y, {'alpha_xattn':alpha_xattn, 'input_embeds_hidden':input_embeds_rnn_hidden}
+
+
+class TransformerCrossAttention(NeuralModule, Exportable):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__()
+        xformer_num_layers = cfg.xattn.get('xformer_num_layers', 2)
+        self.cfg = cfg
+        cross_attn_cfg= cfg.xattn
+        # causal attention decoder by default
+        self.xattn_decoder = TransformerDecoder(
+            hidden_size=cfg.output_dim,
+            num_layers=xformer_num_layers,
+            inner_size=1*cfg.output_dim,
+            num_attention_heads=cross_attn_cfg.num_attention_heads,
+            ffn_dropout=cross_attn_cfg.ffn_dropout,
+            attn_score_dropout=cross_attn_cfg.attn_score_dropout,
+            attn_layer_dropout=cross_attn_cfg.attn_layer_dropout,
+            hidden_act=cross_attn_cfg.hidden_act,
+            pre_ln=cross_attn_cfg.pre_ln,
+            pre_ln_final_layer_norm=cross_attn_cfg.pre_ln_final_layer_norm,
+        )
+
+
+    def forward(self, encoder_states, encoded_len, input_embeds, input_lengths, decoder_mems_list = None, return_mems = False, *args, **kwargs):
+        assert input_embeds.shape[-1] == encoder_states.shape[-1]
+        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+        dec_mask = lens_to_mask(input_lengths, input_embeds.shape[1]).to(input_lengths.dtype)
+        y = self.xattn_decoder(
+            decoder_states=input_embeds,
+            decoder_mask=dec_mask,
+            encoder_states=encoder_states,
+            encoder_mask=enc_mask,
+            decoder_mems_list=decoder_mems_list,
+            return_mems=return_mems,
+            return_mems_as_list=False,
+        )
+        if return_mems:
+            extra_outpus = {'decoder_mems_list':y}
+            y = y[-1][:, -input_embeds.shape[1]:]
+        assert y.shape == input_embeds.shape
+        return y, extra_outpus
+
+
+class ProjectTransformerCrossAttention(NeuralModule, Exportable):
+    """Audio perception model with basic modality_adapter (some fc layers)."""
+
+    def __init__(self, cfg: DictConfig, *args, **kwargs):
+        super().__init__()
+        xformer_num_layers = cfg.xattn.get('xformer_num_layers', 2)
+        xformer_dims = cfg.xattn.get('xformer_dims', 1024)
+        self.cfg = cfg
+        cross_attn_cfg= cfg.xattn
+        # causal attention decoder by default
+        self.input_proj1= nn.Linear(cfg.output_dim, xformer_dims)
+        self.input_proj2= nn.Linear(cfg.output_dim, xformer_dims)
+        self.output_proj= nn.Linear(xformer_dims, cfg.output_dim)
+        self.xattn_decoder = TransformerDecoder(
+            hidden_size=xformer_dims,
+            num_layers=xformer_num_layers,
+            inner_size=4*xformer_dims,
+            num_attention_heads=cross_attn_cfg.num_attention_heads,
+            ffn_dropout=cross_attn_cfg.ffn_dropout,
+            attn_score_dropout=cross_attn_cfg.attn_score_dropout,
+            attn_layer_dropout=cross_attn_cfg.attn_layer_dropout,
+            hidden_act=cross_attn_cfg.hidden_act,
+            pre_ln=cross_attn_cfg.pre_ln,
+            pre_ln_final_layer_norm=cross_attn_cfg.pre_ln_final_layer_norm,
+        )
+
+
+    def forward(self, encoder_states, encoded_len, input_embeds, input_lengths, decoder_mems_list = None, return_mems = False, *args, **kwargs):
+        assert input_embeds.shape[-1] == encoder_states.shape[-1]
+        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+        dec_mask = lens_to_mask(input_lengths, input_embeds.shape[1]).to(input_lengths.dtype)
+        y = self.xattn_decoder(
+            decoder_states=self.input_proj1(input_embeds),
+            decoder_mask=dec_mask,
+            encoder_states=self.input_proj2(encoder_states),
+            encoder_mask=enc_mask,
+            decoder_mems_list=decoder_mems_list,
+            return_mems=return_mems,
+            return_mems_as_list=False,
+        )
+        if return_mems:
+            extra_outpus = {'decoder_mems_list':y}
+            y = y[-1][:, -input_embeds.shape[1]:]
+        y=self.output_proj(y) + input_embeds
+        assert y.shape == input_embeds.shape
+        return y, extra_outpus

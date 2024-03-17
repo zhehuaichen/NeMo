@@ -106,6 +106,8 @@ def get_random_questions(question_file):
 
 
 def sample_and_attach_question(cut, questions: List[str]):
+    if hasattr(cut, 'question'):
+        return cut
     q = random.sample(questions, 1)[0]
     cut.question = q
     return cut
@@ -201,6 +203,12 @@ def read_nemo_manifest(config, is_tarred: bool) -> LhotseCutSet:
                 f"Initializing Lhotse CutSet from a single NeMo manifest (non-tarred): '{config.manifest_filepath}'"
             )
             cuts = CutSet(LazyNeMoIterator(config.manifest_filepath, **common_kwargs))
+            question_file = config.get("question_file_set", None)
+            if question_file is not None:
+                logging.info(f"Use random questions from {question_file} for {config.manifest_filepath}")
+                assert len(question_file) == 1, "Only one question file is supported for non-tarred data."
+                questions = get_random_questions(question_file[0])
+                cuts = cuts.map(partial(sample_and_attach_question, questions=questions))
         else:
             logging.info(
                 f"Initializing Lhotse CutSet from multiple NeMo manifests (non-tarred): '{config.manifest_filepath}'"
@@ -211,16 +219,35 @@ def read_nemo_manifest(config, is_tarred: bool) -> LhotseCutSet:
                 else [None for i in range(len(config["manifest_filepath"]))]
             )
             cutsets = []
+            weights = []
             for manifest_info, question_file in zip(config["manifest_filepath"], question_file_set):
-                cs = CutSet(LazyNeMoIterator(manifest_info, **common_kwargs))
+
+                if len(manifest_info) == 1:
+                    cs = CutSet(LazyNeMoIterator(manifest_info, **common_kwargs))
+                    weight = len(cs)
+                else:
+                    assert (
+                        isinstance(manifest_info, Sequence)
+                        and len(manifest_info) == 2
+                        and isinstance(manifest_info[1], (int, float))
+                    ), (
+                        "Supported inputs types for config.manifest_filepath are: "
+                        "str | list[list[str]] | list[tuple[str, number]] "
+                        "where str is a path and number is a mixing weight (it may exceed 1.0). "
+                        f"We got: '{manifest_info}'"
+                    )
+                    manifest_path, weight = manifest_info
+                    cs = CutSet(LazyNeMoIterator(manifest_path, **common_kwargs))
+
                 if question_file is not None:
                     logging.info(f"Use random questions from {question_file} for {manifest_info}")
                     questions = get_random_questions(question_file)
                     cs = cs.map(partial(sample_and_attach_question, questions=questions))
-
+                logging.info(f"- {manifest_path=} {weight=}")
+                weights.append(weight)
                 cutsets.append(cs)
             if (max_open_streams := config.lhotse.get("max_open_streams", None)) is not None:
-                cuts = CutSet.infinite_mux(*cutsets, max_open_streams=max_open_streams, seed="trng")
+                cuts = CutSet.infinite_mux(*cutsets, weights=weights, max_open_streams=max_open_streams, seed="trng")
             else:
-                cuts = CutSet.mux(*[cs for cs in cutsets], seed="trng")
+                cuts = CutSet.mux(*[cs for cs in cutsets], weights=weights, seed="trng")
     return cuts

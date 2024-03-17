@@ -14,6 +14,8 @@ def collate_vectors(items, max_length: int, padding_value):
             [vectors, padding_value * torch.ones(vectors.size(0), max_length - vectors.size(1), dtype=vectors.dtype)],
             dim=1,
         )
+    if items[0].shape[0] < 1:
+        vectors = vectors.long()
     return vectors
 
 
@@ -78,11 +80,7 @@ class TextProcessing:
             self.eos_id = tokenizer.eos_id
         else:
             self.eos_id = None
-
-        if hasattr(tokenizer, "pad_id") and tokenizer.pad_id > 0:
-            self.pad_id = tokenizer.pad_id
-        else:
-            self.pad_id = self.eos_id if self.eos_id is not None else 0
+        self.pad_id = self.eos_id if self.eos_id is not None else 0
 
         self.sep_id = sep_id if add_sep else None
 
@@ -102,7 +100,7 @@ class TextProcessing:
             mask.append(mask_or_not)
         return output_tokens, mask
 
-    def _process_example(self, context: str, output: str):
+    def _process_example(self, context: str, output: str, lang: str):
         """
         Create an example by concatenating text and answer.
         Truncation is carried out when needed, but it is performed only on the prompt side.
@@ -110,6 +108,13 @@ class TextProcessing:
 
         function copied from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
         """
+        def _text_to_ids(text, alpha=None, lang=None):
+            from nemo.collections.common.tokenizers.aggregate_tokenizer import AggregateTokenizer
+            if isinstance(self.tokenizer, AggregateTokenizer):
+                return self.tokenizer.text_to_ids(text, lang)
+            else:
+                return self.tokenizer.text_to_ids(text, alpha)
+
         if self.prompt_template is not None:
             assert f'{{{self.input_key}}}' in self.prompt_template
             assert f'{{{self.output_key}}}' in self.prompt_template
@@ -142,12 +147,12 @@ class TextProcessing:
             pre_pad = []
         answer_text = text[len(context) :]
         # if input_text_mask_ratio, only do it on the input but not label
-        answer_ids = pre_pad + self.tokenizer.text_to_ids(
-            answer_text, self.sample_alpha if self.input_text_mask_ratio is None else None
+        answer_ids = pre_pad + _text_to_ids(
+            answer_text, self.sample_alpha if self.input_text_mask_ratio is None else None, lang=lang
         )
         if self.end_string:
-            answer_ids += self.tokenizer.text_to_ids(self.end_string)
-        context_ids = pre_pad + self.tokenizer.text_to_ids(context)
+            answer_ids += _text_to_ids(self.end_string, lang=lang)
+        context_ids = pre_pad + _text_to_ids(context, lang=lang)
 
         # for the long context cases, collate_fn includes self.tokens_to_generate for padding
         total_ids = len(context_ids) + max(len(answer_ids), self.tokens_to_generate)
@@ -188,7 +193,7 @@ class TextProcessing:
                     answer_ids, self.input_text_mask_ratio, self.tokenizer.unk_id
                 )
             else:
-                sample_answer_ids = pre_pad + self.tokenizer.text_to_ids(answer_text, self.sample_alpha)
+                sample_answer_ids = pre_pad + _text_to_ids(answer_text, self.sample_alpha, lang=lang)
                 # does not consider different length for now
                 masked_answer_ids, _ = self._random_mask_tokens(
                     answer_ids, self.input_text_mask_ratio, self.tokenizer.unk_id, sample_tokens=sample_answer_ids,
@@ -247,12 +252,15 @@ def convert_canary_prompt_to_text(prompt, is_canary_tokens_augment):
             assert False, 'Unknown language {}'.format(prompt)
         return lang
 
-    def get_task_template(text, is_canary_tokens_augment):
+    def get_task_template(text, is_canary_tokens_augment, simple_augment=True):
         if text == "<|transcribe|":
             template = 'Transcribe the spoken content to written <|SLANG|> text, <|PNC|>.'
         elif text == "<|translate|":
             if is_canary_tokens_augment:
-                template = 'Transcribe the spoken content to written <|SLANG|> text, then translate this to English text, then translate this to <|TLANG|> text, <|PNC|>'
+                if simple_augment:
+                    template = 'Transcribe the spoken content to written <|SLANG|> text, then translate this to <|TLANG|> text, <|PNC|>'
+                else:
+                    template = 'Transcribe the spoken content to written <|SLANG|> text, then translate this to English text, then translate this to <|TLANG|> text, <|PNC|>'
             else:
                 template = 'Translate the spoken <|SLANG|> content to written <|TLANG|> text, <|PNC|>'
         else:
@@ -304,7 +312,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         canary_processor: Optional = None,
         context_len_for_AR_decoding: Optional = 5,
         convert_canary_prompt_to_text: bool = False,
+        prepend_to_exist_question: Optional = None,
         canary_tokens_augment_ratio: float = 0.0,
+        random_context_prob: float = 0.0,
     ):
         from lhotse.dataset import AudioSamples, CutMix
 
@@ -322,7 +332,24 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         self.canary_processor = canary_processor
         self.context_len_for_AR_decoding = context_len_for_AR_decoding
         self.convert_canary_prompt_to_text = convert_canary_prompt_to_text
+        self.prepend_to_exist_question = prepend_to_exist_question
         self.canary_tokens_augment_ratio = canary_tokens_augment_ratio
+        self.random_context_prob = random_context_prob
+
+    def _inject_random_context_into_question(self, cut, random_context_num=32, random_context_positive_percent=0.1):
+        if self.random_context_prob is not None and self.random_context_prob > 0:
+            current_words = cut.supervisions[0].text.split()
+            if len(current_words) == 0:
+                return
+            if np.random.random() < self.random_context_prob and hasattr(self, 'random_context') and len(self.random_context) > 0:
+                positive_num = int(random_context_num * random_context_positive_percent)
+                positives = np.random.choice(current_words, positive_num)
+                negatives = np.random.choice(self.random_context, random_context_num - positive_num)
+                candidate_words = np.concatenate((positives, negatives))
+                np.random.shuffle(candidate_words)
+                context = f"Following words may occur in audio: {candidate_words} ".replace('\n', '')
+                cut.question = context + cut.question
+            self.random_context = current_words
 
     def __getitem__(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
         cuts = cuts.sort_by_duration()
@@ -331,6 +358,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         audio, audio_lens, cuts = self.load_audio(cuts)
 
         return_batch = {}
+        audio_ratio = []
+        for id, cut in enumerate(cuts):
+            if hasattr(cut, "is_text_only") and cut.is_text_only:
+                audio_ratio.append(0.0)
+            else:
+                audio_ratio.append(1.0)
+
         if self.canary_processor != None:
             is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
             _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
@@ -343,12 +377,18 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(
                     canary_tokens[id][: self.context_len_for_AR_decoding].tolist()
                 )
-                if self.convert_canary_prompt_to_text:
+                if audio_ratio[id] == 0.0:
+                    assert hasattr(cut, "question")
+                elif self.prepend_to_exist_question and hasattr(cut, "question"):
+                    cut.question = self.prepend_to_exist_question + cut.question
+                elif self.convert_canary_prompt_to_text:
                     cut.question = convert_canary_prompt_to_text(canary_text, is_canary_tokens_augment)
                 elif hasattr(cut, "question"):
                     pass
                 else:
                     cut.question = self.question + ' ' + canary_text
+        for id, cut in enumerate(cuts):
+            self._inject_random_context_into_question(cut)
 
         collated_text_data = collate_text_data(
             cuts=cuts,
@@ -363,7 +403,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 "sample_ids": list(cuts.ids),
                 "audio_signal": audio,
                 "audio_signal_length": audio_lens,
-                "audio_ratio": torch.ones(audio.shape[0], dtype=torch.float32),
+                "audio_ratio": torch.FloatTensor(audio_ratio),
                 **collated_text_data,
             }
         )
@@ -385,7 +425,8 @@ def collate_text_data(
     examples = [
         adjust_input_ids(
             text_processor._process_example(
-                context=cut.question if hasattr(cut, "question") else default_question, output=cut.supervisions[0].text
+                context=cut.question if hasattr(cut, "question") else default_question, output=cut.supervisions[0].text,
+                lang='en' if cut.supervisions[0].language is None else cut.supervisions[0].language
             )
         )
         for cut in cuts
@@ -414,13 +455,13 @@ def collate_text_data(
         "tokens_length": full_lengths - 1,
         "labels": all_tokens[:, 1:],
         "loss_mask": collate_vectors(
-            [torch.as_tensor(_build_loss_mask(item)[1:]) for item in examples], max_length=max_length, padding_value=0
-        ),
+            [torch.as_tensor(_build_loss_mask(item)) for item in examples], max_length=max_length, padding_value=0
+        )[:, 1:],
         "position_ids": torch.arange(max_length, dtype=torch.long).repeat(batch_size, 1),
         "contexts": collate_vectors(fields["context_ids"], max_length=max_length, padding_value=pad_id),
         "context_lengths": torch.LongTensor([len(seq) for seq in fields["context_ids"]]),
         "answers": collate_vectors(fields["answer_ids"], max_length=max_length, padding_value=pad_id),
-        "max_length": torch.LongTensor([max_length]),
+        "max_length": torch.LongTensor([max_length]*batch_size),
     }
 
 
