@@ -19,7 +19,6 @@ from omegaconf import DictConfig
 try:
     from nemo.collections.nlp.modules.common.megatron.adapters.mcore_mixins import (
         MCoreGPTEmbeddingMixin,
-        MCoreMLPMixin,
         MCoreSelfAttentionMixin,
         MCoreTransformerLayerMixin,
     )
