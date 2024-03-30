@@ -217,6 +217,14 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             for param in self.frozen_model.parameters():
                 param.requires_grad = False
             known_groups.append('model.')
+        elif self.cfg.get('freeze_encoder', False):
+            for param in self.frozen_model.enc_dec_model.enc_dec_model.encoder.parameters():
+                param.requires_grad = False
+            known_groups.append('enc_dec_model.encoder.')
+        elif self.cfg.get('freeze_decoder', False):
+            for param in self.frozen_model.enc_dec_model.enc_dec_model.decoder.parameters():
+                param.requires_grad = False
+            known_groups.append('enc_dec_model.decoder.')
         # TODO(heh): double check this part works properly
         if self.cfg.get('freeze_modality_adapter', False):
             self.perception.modality_adapter.freeze()
@@ -690,6 +698,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.audio_prompt_first = cfg.model.get('audio_prompt_first', True)
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
             gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
+            gpt_cfg.freeze_encoder = cfg.model.get('freeze_encoder', False)
+            gpt_cfg.freeze_decoder = cfg.model.get('freeze_decoder', False)
             gpt_cfg.text_loss_weight = cfg.model.get('text_loss_weight', 1.0)
             gpt_cfg.freeze_audio_encoder = cfg.model.get('freeze_audio_encoder', False)
             gpt_cfg.freeze_modality_adapter = cfg.model.get('freeze_modality_adapter', False)
