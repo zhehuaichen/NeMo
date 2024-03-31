@@ -217,14 +217,22 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             for param in self.frozen_model.parameters():
                 param.requires_grad = False
             known_groups.append('model.')
-        elif self.cfg.get('freeze_encoder', False):
-            for param in self.frozen_model.enc_dec_model.enc_dec_model.encoder.parameters():
-                param.requires_grad = False
-            known_groups.append('enc_dec_model.encoder.')
-        elif self.cfg.get('freeze_decoder', False):
-            for param in self.frozen_model.enc_dec_model.enc_dec_model.decoder.parameters():
-                param.requires_grad = False
-            known_groups.append('enc_dec_model.decoder.')
+        else:
+            if self.cfg.get('freeze_encoder', False):
+                for param in self.frozen_model.enc_dec_model.enc_dec_model.encoder.parameters():
+                    param.requires_grad = False
+                known_groups.append('enc_dec_model.encoder.')
+            if self.cfg.get('freeze_decoder', False):
+                for param in self.frozen_model.enc_dec_model.enc_dec_model.decoder.parameters():
+                    param.requires_grad = False
+                known_groups.append('enc_dec_model.decoder.')
+            if self.cfg.get('freeze_word_emb', False):
+                names = ['encoder_embedding', 'encoder_relative_position_embedding', 'decoder_relative_position_embedding', 'decoder_embedding']
+                for pname in names:
+                    for param in getattr(self.frozen_model.enc_dec_model, pname).parameters():
+                        param.requires_grad = False
+                known_groups.append('enc_dec_model.word_embeddings.')
+                known_groups.append('enc_dec_model.relative_position_embedding.')
         # TODO(heh): double check this part works properly
         if self.cfg.get('freeze_modality_adapter', False):
             self.perception.modality_adapter.freeze()
@@ -698,6 +706,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.audio_prompt_first = cfg.model.get('audio_prompt_first', True)
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
             gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
+            gpt_cfg.freeze_word_emb = cfg.model.get('freeze_word_emb', False)
             gpt_cfg.freeze_encoder = cfg.model.get('freeze_encoder', False)
             gpt_cfg.freeze_decoder = cfg.model.get('freeze_decoder', False)
             gpt_cfg.text_loss_weight = cfg.model.get('text_loss_weight', 1.0)
