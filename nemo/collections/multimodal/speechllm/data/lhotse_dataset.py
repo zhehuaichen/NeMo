@@ -81,6 +81,8 @@ class TextProcessing:
         else:
             self.eos_id = None
         self.pad_id = self.eos_id if self.eos_id is not None else 0
+        if hasattr(tokenizer, "pad_id") and tokenizer.pad_id >= 0:
+            self.pad_id = tokenizer.pad_id
 
         self.sep_id = sep_id if add_sep else None
 

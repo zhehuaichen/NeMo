@@ -127,7 +127,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         self.summarize(max_depth=3)
         # follow gpt
         self.setup_complete = False
-        self.sep_id = cfg.get('sep_id', 49704)
+        self.sep_id = cfg.get('sep_id', self.tokenizer.bos_id)
         self.virtual_tokens = 0
         self.model = self.frozen_model.enc_dec_model
 
@@ -169,7 +169,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
 
         self.tokenizer.legacy = cfg.get('legacy_tokenizer', False)
         self.bos_id = self.tokenizer.bos_id
-        self.pad_token_id = self.tokenizer.eos_id
         self.decoder_seq_length = cfg.get('decoder_seq_length', 40)
 
         # make sure the default pytorch lightning gradient clipping in the basemodel
@@ -1530,3 +1529,110 @@ class CrossAttendModularizedAudioT5Model(ModularizedAudioT5Model):
             return return_state_dict
         else:
             return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+
+class DecoderTextPromptModularizedAudioT5Model(ModularizedAudioT5Model):
+    """Modularized speech GPT model."""
+
+    def prepare_llm_input(self, audio_batch):
+
+        input_signal = audio_batch['audio_signal']
+        input_signal_length = audio_batch['audio_signal_length']
+
+        input_ids, input_length, labels, loss_mask = (
+            audio_batch['contexts'],
+            audio_batch['context_lengths'],
+            audio_batch['labels'],
+            audio_batch['loss_mask'],
+        )
+
+        # [b, t, c]
+        encoded, encoded_len, _ = self.perception(
+            input_signal=input_signal,
+            input_signal_length=input_signal_length,
+            processed_signal=None,
+            processed_signal_length=None,
+        )
+        encoder_input, attention_mask, encoder_length = encoded, None, encoded_len
+        # generate encoder_mask from encoder_length
+        enc_mask = torch.arange(encoder_input.shape[1], device=encoder_input.device)[None, :] < encoder_length[:, None]
+        return encoder_input, attention_mask, enc_mask
+
+    def forward(
+        self, audio_batch, checkpoint_activations_all_layers,
+    ):
+        """Forward pass of the model.
+
+        We prepend audio embeddings to the instruction and label text tokens 
+        as the LLM input.
+        """
+        if 'audio_ratio' in audio_batch:
+            self.log(
+                'audio_ratio', audio_batch['audio_ratio'].mean(), prog_bar=True, batch_size=1, rank_zero_only=False
+            )
+            self.log(
+                'local_batch_size',
+                audio_batch['audio_ratio'].shape[0],
+                prog_bar=True,
+                batch_size=1,
+                rank_zero_only=False,
+            )
+
+        encoder_input, _, enc_mask = self.prepare_llm_input(audio_batch)
+        # enc_input = speech prompt
+        # dec_input and label = text prompt and text output label
+        dec_input = audio_batch['tokens']
+        labels = audio_batch['labels']
+        dec_mask = (dec_input != self.tokenizer.eos_id) * (dec_input != self.tokenizer.pad_id).long().contiguous()
+        output = self.frozen_model.enc_dec_model(
+            enc_input_ids=None,
+            enc_attn_mask=enc_mask,
+            dec_input_ids=dec_input,
+            dec_attn_mask=dec_mask,
+            token_type_ids=None,
+            labels=labels,
+            output_enc_hidden_only=False,
+            enc_input=encoder_input,
+        )
+        loss_mask = audio_batch['loss_mask']
+        return output, loss_mask
+
+    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
+
+        batch = to_cuda(batch, non_blocking=True)
+        encoder_input, _, enc_mask = self.prepare_llm_input(batch)
+        # enc_input = speech prompt
+        # dec_input and label = text prompt and text output label
+
+        predicted_token_ids, log_probs = self.frozen_model.decode(
+            tokens_enc=None,
+            enc_mask=enc_mask,
+            num_tokens_to_generate=self._inference_config['tokens_to_generate'],
+            encoder_input=encoder_input,
+            tokenizer=self.tokenizer,
+            bos_id = self.bos_id,
+            predicted_tokens_dec = torch.cat([batch['contexts'],torch.full_like(batch['contexts'][:,:1], self.sep_id, device=batch['contexts'].device)], dim=1),
+        )
+        predicted_token_ids = predicted_token_ids[:,batch['contexts'].shape[1]+1:]
+
+        # Special ids to text function to handle stripping <eos> and special tokens with sentencepiece tokenizers.
+        input_text = batch['contexts']
+        preds_text = MegatronT5SFTModel.ids_to_text(predicted_token_ids, self.tokenizer)
+        input_text = MegatronT5SFTModel.ids_to_text(input_text, self.tokenizer)
+        labels = batch['answers']
+
+        if labels is not None:
+            labels_text = MegatronT5SFTModel.ids_to_text(labels, self.tokenizer)
+        else:
+            labels_text = [None] * len(preds_text)
+
+        return {
+            'input_text': input_text,
+            'preds_text': preds_text,
+            'labels_text': labels_text,
+        }
+
+    def _build_dataset(self, data_cfg, is_train=True):
+        # this is crucial so as to tell the decoder when to start generate answer after context and paddings
+        assert data_cfg.add_sep == True
+        return super()._build_dataset(data_cfg, is_train)
