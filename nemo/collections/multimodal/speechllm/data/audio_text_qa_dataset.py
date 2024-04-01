@@ -302,6 +302,8 @@ class TextProcessing(object):
 
         function copied from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
         """
+        context = str(context)
+        output = str(output)
         if self.prompt_template is not None:
             assert f'{{{self.input_key}}}' in self.prompt_template
             assert f'{{{self.output_key}}}' in self.prompt_template
@@ -1551,12 +1553,9 @@ def get_aqa_dataset_from_config(
         num_train_samples_per_dataset = [[None]] * len(manifest_filepath)
 
     for dataset_idx, (file_path, num_samples) in enumerate(zip(manifest_filepath, num_train_samples_per_dataset)):
-        question_file_set = config.get('question_file_set', None)
-        if question_file_set is not None:
-            assert len(question_file_set) == len(manifest_filepath)
-            question_file = question_file_set[dataset_idx]
-        else:
-            question_file = None
+        question_file = config.get('question_file', None)
+        if isinstance(question_file, ListConfig) and len(question_file) == len(manifest_filepath):
+            question_file = question_file[dataset_idx]
         dataset = data_cls(
             manifest_filepath=file_path,
             tokenizer=tokenizer,

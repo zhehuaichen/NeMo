@@ -81,6 +81,7 @@ def main(cfg) -> None:
         peft_model_cfg.precision = cfg.trainer.precision
         peft_model_cfg.data.test_ds = cfg.model.data.test_ds
         peft_model_cfg.data.test_ds.prompt_template = peft_model_cfg.data.train_ds.prompt_template
+        # peft_model_cfg.data.test_ds.prompt_template = "[INST]\n<<SYS>>\nPlease answer the following based on the previous speech feature.\n<</SYS>>\n\nTranscribe and answer the question: {input}[/INST] {output}"
         peft_model_cfg.data.test_ds.separate_prompt_and_response_with_newline = (
             peft_model_cfg.data.train_ds.separate_prompt_and_response_with_newline
         )
