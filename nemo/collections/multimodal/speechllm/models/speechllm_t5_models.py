@@ -401,7 +401,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             [torch.full([b, 1], self.bos_id, device=device), audio_batch['answers'][:, :-1]], dim=-1
         )
         labels = audio_batch['answers']
-        dec_mask = (dec_input != self.tokenizer.eos_id) * (dec_input != self.tokenizer.pad_id).long().contiguous()
+        dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()
         output = self.frozen_model.enc_dec_model(
             enc_input_ids=None,
             enc_attn_mask=enc_mask,
