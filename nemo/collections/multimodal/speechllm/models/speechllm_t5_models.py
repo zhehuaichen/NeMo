@@ -397,8 +397,9 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         # dec_input and label = text output label
         b = audio_batch['answers'].shape[0]
         device = audio_batch['answers'].device
+        dec_input = audio_batch['masked_answer_ids'] if 'masked_answer_ids' in audio_batch else audio_batch['answers']
         dec_input = torch.cat(
-            [torch.full([b, 1], self.bos_id, device=device), audio_batch['answers'][:, :-1]], dim=-1
+            [torch.full([b, 1], self.bos_id, device=device), dec_input[:, :-1]], dim=-1
         )
         labels = audio_batch['answers']
         dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()

@@ -208,6 +208,7 @@ class TextProcessing:
             input_ids = input_ids + [self.tokenizer.eos_id]
             if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
                 masked_input_ids = masked_input_ids + [self.tokenizer.eos_id]
+                masked_answer_ids += [self.tokenizer.eos_id]
             answer_ids += [self.tokenizer.eos_id]
 
         if len(input_ids) > self.max_seq_length:
@@ -215,6 +216,7 @@ class TextProcessing:
             input_ids = input_ids[: self.max_seq_length]
             if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
                 masked_input_ids = masked_input_ids[: self.max_seq_length]
+                masked_answer_ids = masked_answer_ids[: self.max_seq_length]
         if len(answer_ids) > self.max_seq_length:
             answer_ids = answer_ids[: self.max_seq_length]
 
@@ -228,6 +230,7 @@ class TextProcessing:
 
         if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
             processed_example['masked_input_ids'] = torch.as_tensor(masked_input_ids)
+            processed_example['masked_answer_ids'] = torch.as_tensor(masked_answer_ids)
 
         return processed_example
 
@@ -455,7 +458,7 @@ def collate_text_data(
 
     assert max_length <= max_seq_length, f"{max_length=} <= {max_seq_length=}"
 
-    return {
+    return_dict= {
         "tokens": all_tokens[:, :-1],
         "tokens_length": full_lengths - 1,
         "labels": all_tokens[:, 1:],
@@ -468,6 +471,9 @@ def collate_text_data(
         "answers": collate_vectors(fields["answer_ids"], max_length=max_length, padding_value=pad_id),
         "max_length": torch.LongTensor([max_length]*batch_size),
     }
+    if 'masked_answer_ids' in fields:
+        return_dict['masked_answer_ids'] = collate_vectors(fields["masked_answer_ids"], max_length=max_length, padding_value=pad_id)
+    return return_dict
 
 
 def adjust_input_ids(item: dict) -> dict:
