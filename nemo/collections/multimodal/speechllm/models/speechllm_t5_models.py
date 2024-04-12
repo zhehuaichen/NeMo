@@ -889,7 +889,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 logging.info('Building GPT SFT test datasets.')
                 # Wrap this in a list since the general finetuning parent class supports multi-validation.
                 self._test_ds = self._build_dataset(self.cfg.data.test_ds, is_train=False)
-                logging.info(f'Length of test dataset: {len(self._test_ds[0])}')
+                # logging.info(f'Length of test dataset: {len(self._test_ds[0])}')
 
         if stage == 'validate' or stage == 'test':
             return
@@ -1047,10 +1047,17 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         loss = self.fwd_bwd_step(dataloader_iter, 0, True)
         self.train(mode=mode)
         self.frozen_model.eval()
-        if type(self._validation_dl) == list and len(self._validation_dl) > 1:
-            self.validation_step_outputs[dataloader_idx].append(loss)
+        
+        if mode == 'validation':
+            if type(self._validation_dl) == list and len(self._validation_dl) > 1:
+                self.validation_step_outputs[dataloader_idx].append(loss)
+            else:
+                self.validation_step_outputs.append(loss)
         else:
-            self.validation_step_outputs.append(loss)
+            if type(self.trainer.test_dataloaders) == list and len(self.trainer.test_dataloaders) > 1:
+                self.test_step_outputs[dataloader_idx].append(loss)
+            else:
+                self.test_step_outputs.append(loss)
         return loss
 
     def inference_step(self, dataloader_iter, mode, dataloader_idx=0):
@@ -1218,7 +1225,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                     ):
                         key = input + label
                         total_size += 1
-                        if key not in inp_label_set:
+                        dedup = data_cfg.get('deduplicate', True)
+                        if (not dedup) or key not in inp_label_set:
                             inp_label_set.add(key)
                             deduplicated_outputs['preds'].append(pred)
                             deduplicated_outputs['labels'].append(label)
