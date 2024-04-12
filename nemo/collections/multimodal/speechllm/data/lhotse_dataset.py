@@ -408,7 +408,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         )
         return_batch.update(
             {
-                "sample_ids": list(cuts.ids),
+                "sample_ids": list(range(len(cuts))),
                 "audio_signal": audio,
                 "audio_signal_length": audio_lens,
                 "audio_ratio": torch.FloatTensor(audio_ratio),
@@ -464,7 +464,7 @@ def collate_text_data(
         "labels": all_tokens[:, 1:],
         "loss_mask": collate_vectors(
             [torch.as_tensor(_build_loss_mask(item)) for item in examples], max_length=max_length, padding_value=0
-        )[:, 1:],
+        )[:, 1:].to(torch.long),
         "position_ids": torch.arange(max_length, dtype=torch.long).repeat(batch_size, 1),
         "contexts": collate_vectors(fields["context_ids"], max_length=max_length, padding_value=pad_id),
         "context_lengths": torch.LongTensor([len(seq) for seq in fields["context_ids"]]),
