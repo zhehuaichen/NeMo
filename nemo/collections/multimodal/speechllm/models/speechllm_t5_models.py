@@ -1031,7 +1031,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def validation_step(self, dataloader_iter, inference=False):
         return self.inference_step(dataloader_iter, 'validation')
 
-    def _validation_step_internal(self, dataloader_iter, batch_idx, dataloader_idx=0, inference=False):
+    def _validation_step_internal(self, dataloader_iter, batch_idx, dataloader_idx=0, inference=False, result_mode='validation'):
         """
             Our dataloaders produce a micro-batch and then we fetch
             a number of microbatches depending on the global batch size and model parallel size
@@ -1048,7 +1048,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         self.train(mode=mode)
         self.frozen_model.eval()
         
-        if mode == 'validation':
+        if result_mode == 'validation':
             if type(self._validation_dl) == list and len(self._validation_dl) > 1:
                 self.validation_step_outputs[dataloader_idx].append(loss)
             else:
@@ -1066,7 +1066,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         self._reconfigure_and_process_inference_batch(batch, data_cfg)
         # Meta data from dataset
         metadata = batch.get('metadata', [{}] * len(batch['tokens']))
-        loss = self._validation_step_internal(itertools.chain([batch]), batch_idx, dataloader_idx)
+        loss = self._validation_step_internal(itertools.chain([batch]), batch_idx, dataloader_idx, result_mode=mode)
 
         # We need _inference_config to get generation params
         # add_BOS and tokens_to_generate are set in dataset
