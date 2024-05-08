@@ -131,10 +131,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         self.sample_rate = cfg.sample_rate
         self._setup_tokenizer(cfg.tokenizer)
 
-        from nemo.collections.common.tokenizers.canary_tokenizer import CanaryTokenizer
-
-        self.tokenizer = CanaryTokenizer(self.tokenizer.tokenizers_dict)
-
         super().__init__(cfg=cfg, trainer=trainer)
 
         # Setup audio preprocessor
@@ -464,7 +460,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
                 prompt_format_fn=get_prompt_format_fn(self.prompt_format),
                 inference=inference,
             ),
-            tokenizer=self.tokenizer,
         )
 
     def setup_training_data(self, train_data_config: Optional[DictConfig]):
@@ -623,8 +618,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
             return torch.tensor([0.0])
 
         # During training prompt and prompt_len are null, ignore.
-        signal, signal_len, transcript, transcript_len, prompt, prompt_len, text_minibatch = batch
-        print(f'{text_minibatch["input_ids"].shape=}')
+        signal, signal_len, transcript, transcript_len, prompt, prompt_len = batch
         input_ids, labels = transcript[:, :-1], transcript[:, 1:]
 
         transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
@@ -645,7 +639,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0, eval_mode="val"):
         # During inference, dataloader passes pure prompt without transcript text.
-        signal, signal_len, transcript, transcript_len, prompt, prompt_len, text_minibatch = batch
+        signal, signal_len, transcript, transcript_len, prompt, prompt_len = batch
         input_ids, labels = transcript[:, :-1], transcript[:, 1:]
 
         transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
@@ -953,7 +947,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         return MultiTaskTranscriptionConfig()
 
     def predict_step(self, batch, batch_idx=0, dataloader_idx=0, has_processed_signal=False):
-        signal, signal_len, _, _, prompt, prompt_len, text_minibatch = batch
+        signal, signal_len, _, _, prompt, prompt_len = batch
 
         processed_signal = None
         processed_signal_length = None
