@@ -509,6 +509,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule, adapter_mixins.Adap
         enc_output_attn_mask=None,
         enc_input=None,  # Result of running encoder embedding only
         output_enc_hidden_only=False,
+        enc_dec_attn_mask=None,
     ):
         """
         Return value is per token / per dimension (i.e., non collapsed loss value)
@@ -625,6 +626,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule, adapter_mixins.Adap
                 dec_self_attention_relative_position_bias=decoder_self_attention_relative_position_bias,
                 dec_cross_attention_relative_position_bias=decoder_cross_attention_relative_position_bias,
                 batch_data=batch_data,
+                enc_dec_attn_mask=enc_dec_attn_mask,
             )
 
             if self.post_process and self.add_decoder:

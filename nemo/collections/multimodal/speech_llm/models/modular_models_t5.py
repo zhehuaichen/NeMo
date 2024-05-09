@@ -41,6 +41,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     build_position_ids,
     get_iterator_k_split,
+    build_attention_mask_3d,
 )
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
@@ -54,6 +55,7 @@ try:
         get_micro_batch_size,
         get_num_microbatches,
     )
+    from apex.transformer.enums import AttnMaskType
 
     HAVE_APEX = True
 except (ImportError, ModuleNotFoundError):
@@ -391,6 +393,23 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         dec_input = torch.cat([torch.full([b, 1], self.bos_id, device=device), dec_input[:, :-1]], dim=-1)
         labels = audio_batch['answers']
         dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()
+        if self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
+            waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
+            waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
+            pre_decision_ratio = self.cfg.streaming.get('pre_decision_ratio', 8)
+            # b l t
+            b, l = dec_mask.shape
+            t= enc_mask.shape[1]
+            enc_dec_attn_mask = torch.zeros([b,l,t], device=dec_mask.device)
+            for i in range(b):
+                waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,))
+                for j in range(l):
+                    if dec_mask[i,j]:
+                        enc_dec_attn_mask[i, j,  : (j + waitk_lagging)*pre_decision_ratio] = 1
+            # invert mask for Megatron
+            enc_dec_attn_mask = enc_dec_attn_mask < 0.5
+        else:
+            enc_dec_attn_mask = None
         output = self.frozen_model.enc_dec_model(
             enc_input_ids=None,
             enc_attn_mask=enc_mask,
@@ -400,6 +419,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             labels=labels,
             output_enc_hidden_only=False,
             enc_input=encoder_input,
+            enc_dec_attn_mask=enc_dec_attn_mask,
         )
         loss_mask = dec_mask
         return output, loss_mask
@@ -505,6 +525,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         with open_dict(gpt_cfg):
             if 'vocab_file' in cfg.model:
                 gpt_cfg.tokenizer.vocab_file = cfg.model.vocab_file
+            gpt_cfg.streaming = cfg.model.get("streaming", None)
             gpt_cfg.legacy_tokenizer = cfg.model.get('legacy_tokenizer', False)
             gpt_cfg.audio_prompt_first = cfg.model.get('audio_prompt_first', True)
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
@@ -924,6 +945,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         # dec_input and label = text output label
         device = batch['audio_signal'].device
 
+        inference_config = self.get_inference_config()
         predicted_token_ids, log_probs = self.frozen_model.decode(
             tokens_enc=None,
             enc_mask=enc_mask,
@@ -931,6 +953,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             encoder_input=encoder_input,
             tokenizer=self.tokenizer,
             bos_id=self.bos_id,
+            sampling_method='wait-k' if 'waitk_lagging' in inference_config else 'greedy-search',
+            sampling_kwargs=inference_config,
         )
 
         # Special ids to text function to handle stripping <eos> and special tokens with sentencepiece tokenizers.

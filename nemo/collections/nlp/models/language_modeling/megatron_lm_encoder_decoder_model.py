@@ -295,6 +295,7 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
         enc_output_attn_mask=None,
         output_enc_hidden_only=False,
         enc_input=None,
+        enc_dec_attn_mask=None,
     ):
         output_tensor = self.enc_dec_model(
             enc_input_ids=encoder_input_ids,
@@ -307,6 +308,7 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             enc_output_attn_mask=enc_output_attn_mask,
             output_enc_hidden_only=output_enc_hidden_only,
             enc_input=enc_input,
+            enc_dec_attn_mask=enc_dec_attn_mask,
         )
 
         return output_tensor
@@ -1111,6 +1113,205 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
         # Return the output tensor of encoder and transpose from [seq_len, batch, hidden] to [batch, seq_len, hidden]
         return output_tensor.transpose(1, 0)
 
+
+    def waitk_decode(
+        self,
+        tokens_enc,
+        enc_mask,
+        num_tokens_to_generate,
+        encoder_input=None,
+        tokenizer=None,
+        enc_output=None,
+        enc_output_attn_mask=None,
+        ignore_ids=[],
+        bos_id=None,  # If bos=None, will use tokenizer.bos_id unless explicitly set to something else.
+        predicted_tokens_dec=None,
+        batch_data=None,
+        sampling_method: str = "greedy-search",
+        sampling_kwargs: dict = {},
+    ):
+        """
+        Args:
+            tokens_enc: a tensor of shape [batch_size, seq_len] that contains the input tokens.
+            enc_mask: a tensor of shape [batch_size, seq_len] that contains the input tokens mask (1 for active, 0 for inactive).
+            num_tokens_to_generate: the max number of tokens to generate.
+            encoder_input: a tensor of shape [batch_size, seq_len, hidden_size] that contains the encoder hidden states (replaces tokens_enc if given).
+            tokenizer: a tokenizer object.
+            enc_output: a tensor of shape [batch_size, seq_len, hidden_size] that contains the encoder hidden states (replaces tokens_enc and encoder_input if given).
+            enc_output_attn_mask: a tensor of shape [batch_size, seq_len] that contains the encoder attention mask (replaces enc_mask if given).
+            ignore_ids: a list of token ids to ignore when sampling.
+            bos_id: the id of the beginning of sentence token. If None, will use tokenizer.bos_id unless explicitly set to something else.
+            predicted_tokens_dec: a tensor of shape [batch_size, seq_len] that contains the tokens that have already been decoded.
+            sampling_method: a sampling method to use in the decoding iterations. Currently supported methods are
+                "beam-search"/"greedy-search"/"topkp-sampling". The argument specifies the sampling function
+                that takes in a tensor of logits [batch_size, vocab_size] and returns a tuple
+                (tensor of log_probs [batch_size], tensor of sampled tokens_ids from logits [batch_size]).
+                If the beam search is enabled, the sampling function returns tensors [batch_size, beam_size]
+            sampling_kwargs: dict with arguments to be passed to the sampling function. Please refer to the method
+                get_sampling_token_fn to see which arguments are required for a chosen sampling_method.
+
+        Returns:
+            tuple of tensors [batch_size, seq_len +1], [batch_size, seq_len] for predicted tokens and their log probs.
+            If sampling_method == 'beam-size' and keep_only_best_tokens is False the shape of the tensors are
+            [batch_size, beam_size, seq_len + 1], [batch_size, beam_size, seq_len]
+        """
+        # Setting up the sampling strategy
+        sample_token_fn, sampling_kwargs = get_sampling_token_fn(sampling_method, sampling_kwargs)
+        pre_decision_ratio = sampling_kwargs.get('pre_decision_ratio', 8)
+        waitk_lagging = sampling_kwargs.get('waitk_lagging', 4)
+        logging.info(f'Decoding using the wait-k {sampling_method} method with {sample_token_fn} {sampling_kwargs}...')
+
+        # Check whether the DDP is initialized. This is needed when running inference outside of training loop.
+        if not parallel_state.model_parallel_is_initialized():
+
+            def dummy():
+                return
+
+            if self.trainer.strategy.launcher is not None:
+                self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+            self.trainer.strategy.setup_environment()
+
+            # Reconfigure microbatch sizes here because on model restore, this will contain the micro/global batch configuration used while training.
+            _reconfigure_microbatch_calculator(
+                rank=0,  # This doesn't matter since it is only used for logging
+                rampup_batch_size=None,
+                global_batch_size=1,
+                micro_batch_size=1,  # Make sure that there is no "grad acc" while decoding.
+                data_parallel_size=1,  # We check above to make sure that dataparallel size is always 1 at inference.
+            )
+
+        # If classes that inherit from this class are using a different tokenizer,
+        tokenizer = self.tokenizer if tokenizer is None else tokenizer
+        app_state = AppState()
+        if tokens_enc is not None:
+            global_batch_per_gpu = tokens_enc.size(0)
+            device = tokens_enc.device
+            encoder_seq_length = tokens_enc.size(1)
+        elif encoder_input is not None:
+            global_batch_per_gpu = encoder_input.size(0)
+            device = encoder_input.device
+            encoder_seq_length = encoder_input.size(1)
+        else:
+            global_batch_per_gpu = enc_output.size(0)
+            device = enc_output.device
+            encoder_seq_length = enc_output.size(1)
+
+        num_micro_batches_before_decode = get_num_microbatches()
+        # Reconfigure microbatch calculator here to set num microbatches to 1 while decoding since its not clear how to decode with "grad acc".
+        # reconfigure back to how things were before decode
+        # TODO: Check if the user is trying to do gradient acc and maybe throw error
+        _reconfigure_microbatch_calculator(
+            rank=app_state.global_rank,
+            rampup_batch_size=None,
+            global_batch_size=global_batch_per_gpu * parallel_state.get_data_parallel_world_size(),
+            micro_batch_size=global_batch_per_gpu,  # Make sure that there is no "grad acc" while decoding.
+            data_parallel_size=parallel_state.get_data_parallel_world_size(),
+        )
+        # TODO: Figure out how to handle bos being either <bos> for NeMo-Megatron and <pad> for Huggingface/Google.
+        bos_id = tokenizer.bos_id if bos_id is None else bos_id
+        # initial prompt can be given
+        if predicted_tokens_dec is None:
+            predicted_tokens_dec = torch.LongTensor([bos_id] * global_batch_per_gpu).unsqueeze(1).to(device)
+        # collect log probs that were used in the sampling
+        predicted_log_probs = torch.zeros((global_batch_per_gpu, 0), dtype=self.autocast_dtype).to(device)
+
+        tensor_shape = [encoder_seq_length, global_batch_per_gpu, self.cfg.encoder.hidden_size]
+        assert predicted_tokens_dec.size(0) == global_batch_per_gpu
+
+        # get encoder hiddens (output)
+        if enc_output is None:
+            # Encode returns a tensr of shape [batch, seq_len, hidden]
+            # All ranks will call `.encode()`, but only the last rank will have a non-empty output tensor.
+            enc_output = self.encode(
+                tokens_enc=tokens_enc, enc_mask=enc_mask, encoder_input=encoder_input, reconfigure_microbatch=False
+            )
+        if enc_output_attn_mask is None:
+            enc_output_attn_mask = enc_mask
+
+        for i in range(num_tokens_to_generate):
+            # No microbatches in decoding. Just the global batch.
+            decoder_seq_length = predicted_tokens_dec.size(1)
+            dec_mask = predicted_tokens_dec != tokenizer.pad_id
+            dec_mask[:, 0] = 1  # Make sure you never mask the first token even if it is <pad>.
+
+            # TODO: add this enc_output_attn_mask
+            cur_src_len = pre_decision_ratio * (i + waitk_lagging)
+            cur_enc_output_attn_mask = enc_output_attn_mask[:, :cur_src_len]
+            cur_enc_output = enc_output[:, :cur_src_len]
+            batch_for_pipeline = [cur_enc_output, cur_enc_output_attn_mask, predicted_tokens_dec, dec_mask, batch_data]
+            arg_names = ['enc_output', 'enc_output_attn_mask', 'dec_input_ids', 'dec_attn_mask', 'batch_data']
+
+            forward_step_func = self._get_forward_output_only_func(arg_names=arg_names, output_name="logits")
+            fwd_bwd_func = get_forward_backward_func()
+
+            output_tensor = fwd_bwd_func(
+                forward_step_func=forward_step_func,
+                data_iterator=iter([batch_for_pipeline,]),
+                model=[self.enc_dec_model],
+                forward_only=True,
+                num_microbatches=1,
+                seq_length=encoder_seq_length,
+                decoder_seq_length=encoder_seq_length,
+                micro_batch_size=get_micro_batch_size(),
+            )
+            # get output tensor
+            if parallel_state.is_pipeline_last_stage():
+                output_tensor = output_tensor[0]['logits']
+                output_tensor = tensor_parallel.gather_from_tensor_model_parallel_region(output_tensor)
+                # make sure it won't sample outside the vocab_size range
+                output_tensor[:, :, tokenizer.vocab_size :] = -float('Inf')
+                # ignore selected indices
+                if ignore_ids:
+                    output_tensor = output_tensor.index_fill(
+                        dim=-1, index=torch.tensor(ignore_ids, device=output_tensor.device), value=-float('Inf')
+                    )
+
+                log_probs, token_ids = sample_token_fn(logits=output_tensor[:, -1, :])
+                # enforce valid range of token ids
+                token_ids = torch.clamp(token_ids, max=tokenizer.vocab_size - 1)
+
+            
+                # collect all predicted tokens and log_probs
+                predicted_tokens_dec = torch.cat(
+                    [predicted_tokens_dec.to(token_ids.device), token_ids.unsqueeze(1)], dim=1
+                )
+                predicted_log_probs = torch.cat(
+                    [predicted_log_probs.to(log_probs.device), log_probs.unsqueeze(1)], dim=1
+                )
+
+            else:
+                predicted_tokens_dec = torch.zeros(
+                    (predicted_tokens_dec.shape[0], predicted_tokens_dec.shape[1] + 1),
+                    dtype=predicted_tokens_dec.dtype,
+                ).cuda()
+                predicted_log_probs = torch.zeros(
+                    (predicted_log_probs.shape[0], predicted_log_probs.shape[1] + 1), dtype=self.autocast_dtype
+                ).cuda()
+
+            if self.cfg.get('pipeline_model_parallel_size', 1) > 1:
+                # Broadcast from the last pipeline stage to all other model-parallel ranks.
+                torch.distributed.broadcast(
+                    predicted_tokens_dec,
+                    parallel_state.get_pipeline_model_parallel_last_rank(),
+                    group=parallel_state.get_pipeline_model_parallel_group(),
+                )
+                torch.distributed.broadcast(
+                    predicted_log_probs,
+                    parallel_state.get_pipeline_model_parallel_last_rank(),
+                    group=parallel_state.get_pipeline_model_parallel_group(),
+                )
+
+        # Reset microbatch calculator to what it was before decoding.
+        _reconfigure_microbatch_calculator(
+            rank=app_state.global_rank,
+            rampup_batch_size=None,
+            global_batch_size=global_batch_per_gpu * parallel_state.get_data_parallel_world_size(),
+            micro_batch_size=global_batch_per_gpu // num_micro_batches_before_decode,
+            data_parallel_size=parallel_state.get_data_parallel_world_size(),
+        )
+
+        return predicted_tokens_dec, predicted_log_probs
+
     def decode(
         self,
         tokens_enc,
@@ -1152,6 +1353,22 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             If sampling_method == 'beam-size' and keep_only_best_tokens is False the shape of the tensors are
             [batch_size, beam_size, seq_len + 1], [batch_size, beam_size, seq_len]
         """
+        if sampling_method == 'wait-k':
+            return self.waitk_decode(
+                tokens_enc=tokens_enc,
+                enc_mask=enc_mask,
+                num_tokens_to_generate=num_tokens_to_generate,
+                encoder_input=encoder_input,
+                tokenizer=tokenizer,
+                enc_output=enc_output,
+                enc_output_attn_mask=enc_output_attn_mask,
+                ignore_ids=ignore_ids,
+                bos_id=bos_id,
+                predicted_tokens_dec=predicted_tokens_dec,
+                batch_data=batch_data,
+                sampling_method='topkp-sampling',
+                sampling_kwargs=sampling_kwargs,
+            )
         # Setting up the sampling strategy
         sample_token_fn, sampling_kwargs = get_sampling_token_fn(sampling_method, sampling_kwargs)
         beam_search = sampling_method == 'beam-search'

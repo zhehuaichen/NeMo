@@ -178,6 +178,7 @@ class MegatronTransformerDecoderModule(MegatronModule, Exportable, MegatronDecod
         get_key_value=False,
         dec_self_attention_relative_position_bias=None,
         dec_cross_attention_relative_position_bias=None,
+        enc_dec_attn_mask=None,
     ):
         # convert to Megatron mask
         dec_attn_mask_3d = build_attention_mask_3d(
@@ -185,7 +186,7 @@ class MegatronTransformerDecoderModule(MegatronModule, Exportable, MegatronDecod
         )
         enc_dec_attn_mask_3d = build_attention_mask_3d(
             source_mask=dec_attn_mask, target_mask=enc_attn_mask, attn_mask_type=AttnMaskType.padding,
-        )
+        ) if enc_dec_attn_mask is None else enc_dec_attn_mask
 
         # transformer decoder
         dec_output = self.model(
