@@ -1,10 +1,14 @@
 import copy
 import random
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import torch.utils.data
+from lhotse.cut import Cut, CutSet
 from lhotse.dataset.collation import collate_vectors as collate_vectors_lhotse
+
+from nemo.collections.common.data.lhotse.text_adapters import NeMoSFTExample
 from nemo.utils import logging
 
 
@@ -303,7 +307,6 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         tokens_to_generate: int,
         pad_to_max_length: bool,
         max_seq_length: int,
-        noise_cuts: Optional = None,
         canary_processor: Optional = None,
         convert_canary_prompt_to_text: bool = False,
         prepend_to_exist_question: Optional = None,
@@ -316,9 +319,6 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         super().__init__()
         self.text_processor = text_processor
         self.load_audio = AudioSamples(fault_tolerant=True)
-        self.maybe_mix_noise = (
-            _identity if noise_cuts is None else CutMix(noise_cuts, pad_to_longest=False, random_mix_offset=True)
-        )
         self.tokens_to_generate = tokens_to_generate
         self.pad_to_max_length = pad_to_max_length
         self.max_seq_length = max_seq_length
@@ -350,62 +350,77 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 cut.question = context + cut.question
             self.random_context = current_words
 
-    def __getitem__(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
-        cuts = cuts.sort_by_duration()
-        cuts = self.maybe_mix_noise(cuts)
+    def __getitem__(self, all_cuts: CutSet) -> dict:
+        ans = {}
 
-        audio, audio_lens, cuts = self.load_audio(cuts)
+        # convert audio cuts to mini-batch
+        cuts = all_cuts.filter(lambda c: isinstance(c, Cut))
+        if cuts:
+            audio, audio_lens, cuts = self.load_audio(cuts)
 
-        return_batch = {}
-        audio_ratio = []
-        for id, cut in enumerate(cuts):
-            if hasattr(cut, "is_text_only") and cut.is_text_only:
-                audio_ratio.append(0.0)
-            else:
-                audio_ratio.append(1.0)
-
-        if self.canary_processor != None:
-            is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
-            _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
+            return_batch = {}
+            audio_ratio = []
             for id, cut in enumerate(cuts):
-                canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
-                if audio_ratio[id] == 0.0:
-                    assert hasattr(cut, "question")
-                elif self.prepend_to_exist_question and hasattr(cut, "question"):
-                    cut.question = self.prepend_to_exist_question + cut.question
-                elif self.convert_canary_prompt_to_text:
-                    cut.question = convert_canary_prompt_to_text(canary_text, is_canary_tokens_augment)
-                elif hasattr(cut, "question"):
-                    pass
+                if hasattr(cut, "is_text_only") and cut.is_text_only:
+                    audio_ratio.append(0.0)
                 else:
-                    cut.question = self.question + ' ' + canary_text
-        metadata = []
-        for id, cut in enumerate(cuts):
-            self._inject_random_context_into_question(
-                cut, random_context_positive_percent=self.random_context_positive_percent
+                    audio_ratio.append(1.0)
+
+            if self.canary_processor != None:
+                is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
+                _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
+                for id, cut in enumerate(cuts):
+                    canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
+                    if audio_ratio[id] == 0.0:
+                        assert hasattr(cut, "question")
+                    elif self.prepend_to_exist_question and hasattr(cut, "question"):
+                        cut.question = self.prepend_to_exist_question + cut.question
+                    elif self.convert_canary_prompt_to_text:
+                        cut.question = convert_canary_prompt_to_text(canary_text, is_canary_tokens_augment)
+                    elif hasattr(cut, "question"):
+                        pass
+                    else:
+                        cut.question = self.question + ' ' + canary_text
+            metadata = []
+            for id, cut in enumerate(cuts):
+                self._inject_random_context_into_question(
+                    cut, random_context_positive_percent=self.random_context_positive_percent
+                )
+                metadata.append({'audio_filepath': cut.id + '.wav'})
+
+            collated_text_data = collate_text_data(
+                cuts=cuts,
+                default_question=self.question,
+                text_processor=self.text_processor,
+                tokens_to_generate=self.tokens_to_generate,
+                pad_to_max_length=self.pad_to_max_length,
+                max_seq_length=self.max_seq_length,
             )
-            metadata.append({'audio_filepath': cut.id + '.wav'})
+            return_batch.update(
+                {
+                    "sample_ids": list(cuts.ids),
+                    "audio_signal": audio,
+                    "audio_signal_length": audio_lens,
+                    "audio_ratio": torch.FloatTensor(audio_ratio),
+                    "metadata": metadata,
+                    **collated_text_data,
+                }
+            )
+            ans.update(return_batch)
 
-        collated_text_data = collate_text_data(
-            cuts=cuts,
-            default_question=self.question,
-            text_processor=self.text_processor,
-            tokens_to_generate=self.tokens_to_generate,
-            pad_to_max_length=self.pad_to_max_length,
-            max_seq_length=self.max_seq_length,
-        )
-        return_batch.update(
-            {
-                "sample_ids": list(cuts.ids),
-                "audio_signal": audio,
-                "audio_signal_length": audio_lens,
-                "audio_ratio": torch.FloatTensor(audio_ratio),
-                "metadata": metadata,
-                **collated_text_data,
-            }
-        )
+        # convert text examples to tensors
+        text_examples = all_cuts.filter(lambda c: isinstance(c, NeMoSFTExample))
+        if text_examples:
+            pad_id = self.text_processor.pad_id
+            text_minibatch = dict(
+                text_input_ids=collate_vectors_lhotse([e.input_ids for e in text_examples], padding_value=pad_id),
+                text_answer_ids=collate_vectors_lhotse([e.answer_ids for e in text_examples], padding_value=pad_id),
+                text_context_ids=collate_vectors_lhotse([e.context_ids for e in text_examples], padding_value=pad_id),
+                text_masks=collate_vectors_lhotse([e.mask for e in text_examples], padding_value=pad_id),
+            )
+            ans.update(text_minibatch)
 
-        return return_batch
+        return ans
 
 
 def collate_text_data(

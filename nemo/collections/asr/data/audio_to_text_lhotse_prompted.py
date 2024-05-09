@@ -16,12 +16,13 @@ from typing import Callable, Sequence
 import omegaconf
 import torch.utils.data
 from lhotse import CutSet
-from lhotse.cut import MixedCut, MonoCut
+from lhotse.cut import Cut, MixedCut, MonoCut
 from lhotse.dataset import AudioSamples
 from lhotse.dataset.collation import collate_vectors
 
-from nemo.collections.asr.data.audio_to_text_lhotse import TokenizerWrapper
+from nemo.collections.common.data.lhotse.text_adapters import NeMoSFTExample
 from nemo.collections.common.tokenizers import CanaryTokenizer, TokenizerSpec
+from nemo.collections.common.tokenizers.aggregate_tokenizer import TokenizerWrapper
 
 
 class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
