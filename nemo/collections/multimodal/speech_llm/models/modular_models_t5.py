@@ -393,7 +393,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         dec_input = torch.cat([torch.full([b, 1], self.bos_id, device=device), dec_input[:, :-1]], dim=-1)
         labels = audio_batch['answers']
         dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()
-        if self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
+        if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
             waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
             waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
             pre_decision_ratio = self.cfg.streaming.get('pre_decision_ratio', 8)
@@ -574,10 +574,13 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.lora_tuning = cfg.model.lora_tuning
             # for AudioGPTLoRAModel
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
-            gpt_cfg.perception = cfg.model.perception
+            gpt_cfg.perception = copy.deepcopy(cfg.model.perception)
             gpt_cfg.pretrained_audio_model = cfg.model.get('pretrained_audio_model', None)
             gpt_cfg.perception.preprocessor = audio_cfg.preprocessor
             gpt_cfg.perception.encoder = audio_cfg.encoder
+            if hasattr(cfg.model.perception, 'encoder'):
+                for k, v in cfg.model.perception.encoder.items():
+                    setattr(gpt_cfg.perception.encoder, k, v)
             modality_adapter_cfg = gpt_cfg.perception.modality_adapter
             modality_adapter_cfg.feat_in = audio_cfg.encoder.d_model
             gpt_cfg.perception.output_dim = gpt_cfg.encoder.hidden_size
