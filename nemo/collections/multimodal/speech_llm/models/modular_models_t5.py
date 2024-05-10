@@ -16,8 +16,8 @@ import copy
 import itertools
 import json
 import os
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import sacrebleu
@@ -32,19 +32,19 @@ from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset, 
 from nemo.collections.asr.models import ASRModel, SpeechEncDecSelfSupervisedModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.common.metrics import MetricStringToTorchMetric, TextMetricsSet
-from nemo.collections.nlp.models.language_modeling.megatron_t5_sft_model import MegatronT5SFTModel
-from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import to_cuda
 from nemo.collections.multimodal.speech_llm.data.audio_text_qa_dataset import (
     get_aqa_dataset_from_config,
     get_tarred_aqa_dataset_from_config,
 )
 from nemo.collections.multimodal.speech_llm.modules.common.audio_text_generation_utils import generate
 from nemo.collections.multimodal.speech_llm.modules.perception import AudioPerceptionModule, MultiAudioPerceptionModule
+from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import to_cuda
 from nemo.collections.nlp.data.language_modeling.megatron.blendable_dataset import BlendableDataset
 from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_samplers import (
     MegatronPretrainingBatchSampler,
 )
 from nemo.collections.nlp.models.language_modeling.megatron_t5_adapter_model import MegatronT5LoraModel
+from nemo.collections.nlp.models.language_modeling.megatron_t5_sft_model import MegatronT5SFTModel
 from nemo.collections.nlp.models.nlp_model import NLPModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
@@ -97,14 +97,13 @@ default_inference_config = {'tokens_to_generate': 30}
 class ModularizedAudioT5Model(MegatronT5LoraModel):
     """Modularized speech GPT model."""
 
-
     def setup_perception_modules(self, cfg):
         if 'target' in cfg.perception:
             imported_cls = model_utils.import_class_by_path(cfg.perception.target)
-            pretrained_audio_model = cfg.pretrained_canary_model if hasattr(cfg, "pretrained_canary_model") else cfg.pretrained_audio_model
-            self.perception = imported_cls(
-                cfg=cfg.perception
+            pretrained_audio_model = (
+                cfg.pretrained_canary_model if hasattr(cfg, "pretrained_canary_model") else cfg.pretrained_audio_model
             )
+            self.perception = imported_cls(cfg=cfg.perception)
         else:
             self.perception = (
                 AudioPerceptionModule(cfg=cfg.perception)
@@ -150,7 +149,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             save_restore_connector=NLPSaveRestoreConnector(),
         )
         logging.info(f"self.frozen_model.cfg: {self.frozen_model.cfg}")
-        
 
     def init_model(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
@@ -232,7 +230,12 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                     param.requires_grad = False
                 known_groups.append('enc_dec_model.decoder.')
             if self.cfg.get('freeze_word_emb', False):
-                names = ['encoder_embedding', 'encoder_relative_position_embedding', 'decoder_relative_position_embedding', 'decoder_embedding']
+                names = [
+                    'encoder_embedding',
+                    'encoder_relative_position_embedding',
+                    'decoder_relative_position_embedding',
+                    'decoder_embedding',
+                ]
                 for pname in names:
                     for param in getattr(self.frozen_model.enc_dec_model, pname).parameters():
                         param.requires_grad = False
@@ -397,16 +400,13 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 rank_zero_only=False,
             )
 
-            
         encoder_input, attention_mask, enc_mask = self.prepare_llm_input(audio_batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         b = audio_batch['answers'].shape[0]
         device = audio_batch['answers'].device
         dec_input = audio_batch['masked_answer_ids'] if 'masked_answer_ids' in audio_batch else audio_batch['answers']
-        dec_input = torch.cat(
-            [torch.full([b, 1], self.bos_id, device=device), dec_input[:, :-1]], dim=-1
-        )
+        dec_input = torch.cat([torch.full([b, 1], self.bos_id, device=device), dec_input[:, :-1]], dim=-1)
         labels = audio_batch['answers']
         dec_mask = (dec_input != self.tokenizer.pad_id).long().contiguous()
         output = self.frozen_model.enc_dec_model(
@@ -569,10 +569,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                     if hasattr(self.perception, "tokenizer")
                     else self.perception.asr_model.tokenizer
                 )
-                canary_processer=PromptedAudioToTextLhotseDataset(
-                    tokenizer=perception_tokenizer,
-                    prompt_format_fn=get_prompt_format_fn('canary'),
-                    inference=True,
+                canary_processer = PromptedAudioToTextLhotseDataset(
+                    tokenizer=perception_tokenizer, prompt_format_fn=get_prompt_format_fn('canary'), inference=True,
                 )
             else:
                 canary_processer = None
@@ -708,7 +706,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         with open_dict(gpt_cfg):
             if 'vocab_file' in cfg.model:
                 gpt_cfg.tokenizer.vocab_file = cfg.model.vocab_file
-            gpt_cfg.legacy_tokenizer= cfg.model.get('legacy_tokenizer', False)
+            gpt_cfg.legacy_tokenizer = cfg.model.get('legacy_tokenizer', False)
             gpt_cfg.audio_prompt_first = cfg.model.get('audio_prompt_first', True)
             gpt_cfg.ignore_dummy_audio = cfg.model.get('ignore_dummy_audio', False)
             gpt_cfg.freeze_llm = cfg.model.get('freeze_llm', True)
@@ -723,7 +721,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.global_batch_size = cfg.model.data.train_ds.global_batch_size
             gpt_cfg.sequence_parallel = cfg.model.get("sequence_parallel", False)
             gpt_cfg.tensor_model_parallel_size = cfg.model.get(
-                "tensor_model_parallel_size", gpt_cfg.tensor_model_parallel_size if hasattr(gpt_cfg, "tensor_model_parallel_size") else 1
+                "tensor_model_parallel_size",
+                gpt_cfg.tensor_model_parallel_size if hasattr(gpt_cfg, "tensor_model_parallel_size") else 1,
             )
             gpt_cfg.activations_checkpoint_granularity = cfg.model.get("activations_checkpoint_granularity", None)
             gpt_cfg.activations_checkpoint_num_layers = cfg.model.get("activations_checkpoint_num_layers", None)
@@ -829,9 +828,9 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             model.perception.encoder.load_state_dict(
                 audio_model.encoder.state_dict(), strict='adapter' not in cfg.model.perception
             )
-            logging.info(f'Loaded pretrained audio model from {pretrained_audio_model}')
+            logging.info(f'Loaded pretrained audio model from {cfg.model.pretrained_audio_model}')
         else:
-            logging.info(f'Not load pretrained audio model from {pretrained_audio_model}')
+            logging.info(f'Not load pretrained audio model from {cfg.model.pretrained_audio_model}')
         if cfg.model.get('use_am_tokenizer', False):
             model.tokenizer = audio_model.tokenizer
             logging.info(f'Use AM tokenizer: {audio_model.tokenizer}')
@@ -907,7 +906,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         logging.info('Building GPT SFT traing datasets.')
         self._train_ds = self._build_dataset(self.cfg.data.train_ds)
         # logging.info(f'Length of train dataset: {len(self._train_ds)}')
-
 
     def setup_training_data(self, training_data_config=None):
         return
@@ -1042,7 +1040,9 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def validation_step(self, dataloader_iter, inference=False):
         return self.inference_step(dataloader_iter, 'validation')
 
-    def _validation_step_internal(self, dataloader_iter, batch_idx, dataloader_idx=0, inference=False, result_mode='validation'):
+    def _validation_step_internal(
+        self, dataloader_iter, batch_idx, dataloader_idx=0, inference=False, result_mode='validation'
+    ):
         """
             Our dataloaders produce a micro-batch and then we fetch
             a number of microbatches depending on the global batch size and model parallel size
@@ -1058,7 +1058,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         loss = self.fwd_bwd_step(dataloader_iter, 0, True)
         self.train(mode=mode)
         self.frozen_model.eval()
-        
+
         if result_mode == 'validation':
             if type(self._validation_dl) == list and len(self._validation_dl) > 1:
                 self.validation_step_outputs[dataloader_idx].append(loss)
@@ -1134,7 +1134,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             num_tokens_to_generate=self._inference_config['tokens_to_generate'],
             encoder_input=encoder_input,
             tokenizer=self.tokenizer,
-            bos_id = self.bos_id,
+            bos_id=self.bos_id,
         )
 
         # Special ids to text function to handle stripping <eos> and special tokens with sentencepiece tokenizers.
@@ -1408,7 +1408,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             decoder_seq_length=dec_seq_length,
         )
 
-
         # only the last stages of the pipeline return losses
         if losses_reduced_per_micro_batch:
             if (not forward_only) or self.cfg.data.get('validation_drop_last', True):
@@ -1461,7 +1460,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
 
     def test_step(self, dataloader_iter, dataloader_idx=0):
         return self.inference_step(dataloader_iter, 'test')
-
 
     def training_step(self, dataloader_iter):
         batch, batch_idx, dataloader_idx = next(dataloader_iter)
@@ -1544,10 +1542,16 @@ class DecoderTextPromptModularizedAudioT5Model(ModularizedAudioT5Model):
             num_tokens_to_generate=self._inference_config['tokens_to_generate'],
             encoder_input=encoder_input,
             tokenizer=self.tokenizer,
-            bos_id = self.bos_id,
-            predicted_tokens_dec = torch.cat([batch['contexts'],torch.full_like(batch['contexts'][:,:1], self.sep_id, device=batch['contexts'].device)], dim=1),
+            bos_id=self.bos_id,
+            predicted_tokens_dec=torch.cat(
+                [
+                    batch['contexts'],
+                    torch.full_like(batch['contexts'][:, :1], self.sep_id, device=batch['contexts'].device),
+                ],
+                dim=1,
+            ),
         )
-        predicted_token_ids = predicted_token_ids[:,batch['contexts'].shape[1]+1:]
+        predicted_token_ids = predicted_token_ids[:, batch['contexts'].shape[1] + 1 :]
 
         # Special ids to text function to handle stripping <eos> and special tokens with sentencepiece tokenizers.
         input_text = batch['contexts']
