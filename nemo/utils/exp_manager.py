@@ -605,7 +605,7 @@ def check_resume(
     checkpoint = None
     if resume_from_checkpoint:
         checkpoint = resume_from_checkpoint
-    if resume_if_exists:
+    if resume_from_checkpoint is None and resume_if_exists:
         # Use <log_dir>/checkpoints/ unless `dirpath` is set
         checkpoint_dir = Path(dirpath) if dirpath else Path(Path(log_dir) / "checkpoints")
 
