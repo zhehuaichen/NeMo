@@ -956,7 +956,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             encoder_input=encoder_input,
             tokenizer=self.tokenizer,
             bos_id=self.bos_id,
-            sampling_method='wait-k' if 'waitk_lagging' in inference_config else 'greedy-search',
+            sampling_method='wait-k' if 'waitk_lagging' in inference_config and inference_config.waitk_lagging is not None else 'greedy-search',
             sampling_kwargs=inference_config,
         )
 
