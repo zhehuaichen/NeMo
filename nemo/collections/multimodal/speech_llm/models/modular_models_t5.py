@@ -402,7 +402,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             t= enc_mask.shape[1]
             enc_dec_attn_mask = torch.zeros([b,l,t], device=dec_mask.device)
             for i in range(b):
-                waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,))
+                waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=text_length.device)
                 for j in range(l):
                     if dec_mask[i,j]:
                         enc_dec_attn_mask[i, j,  : text_length[i] + (j + waitk_lagging)*pre_decision_ratio] = 1
