@@ -1129,6 +1129,7 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
         batch_data=None,
         sampling_method: str = "greedy-search",
         sampling_kwargs: dict = {},
+        context_length=None
     ):
         """
         Args:
@@ -1236,6 +1237,10 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
 
             # TODO: add this enc_output_attn_mask
             cur_src_len = pre_decision_ratio * (i + waitk_lagging)
+            if context_length is not None:
+                # for now only support sharing the same text context for a batch 
+                assert torch.equal(context_length, torch.ones_like(context_length) * context_length[0])
+                cur_src_len += context_length[0]
             cur_enc_output_attn_mask = enc_output_attn_mask[:, :cur_src_len]
             cur_enc_output = enc_output[:, :cur_src_len]
             batch_for_pipeline = [cur_enc_output, cur_enc_output_attn_mask, predicted_tokens_dec, dec_mask, batch_data]
@@ -1353,22 +1358,6 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             If sampling_method == 'beam-size' and keep_only_best_tokens is False the shape of the tensors are
             [batch_size, beam_size, seq_len + 1], [batch_size, beam_size, seq_len]
         """
-        if sampling_method == 'wait-k':
-            return self.waitk_decode(
-                tokens_enc=tokens_enc,
-                enc_mask=enc_mask,
-                num_tokens_to_generate=num_tokens_to_generate,
-                encoder_input=encoder_input,
-                tokenizer=tokenizer,
-                enc_output=enc_output,
-                enc_output_attn_mask=enc_output_attn_mask,
-                ignore_ids=ignore_ids,
-                bos_id=bos_id,
-                predicted_tokens_dec=predicted_tokens_dec,
-                batch_data=batch_data,
-                sampling_method='topkp-sampling',
-                sampling_kwargs=sampling_kwargs,
-            )
         # Setting up the sampling strategy
         sample_token_fn, sampling_kwargs = get_sampling_token_fn(sampling_method, sampling_kwargs)
         beam_search = sampling_method == 'beam-search'

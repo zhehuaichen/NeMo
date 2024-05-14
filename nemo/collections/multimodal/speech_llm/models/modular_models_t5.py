@@ -362,7 +362,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         )
         # generate encoder_mask from encoder_length
         enc_mask = torch.arange(encoder_input.shape[1], device=encoder_input.device)[None, :] < encoder_length[:, None]
-        return encoder_input, attention_mask, enc_mask
+        return encoder_input, attention_mask, enc_mask, input_length
 
     def forward(
         self, audio_batch, checkpoint_activations_all_layers,
@@ -384,7 +384,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 rank_zero_only=False,
             )
 
-        encoder_input, attention_mask, enc_mask = self.prepare_llm_input(audio_batch)
+        encoder_input, attention_mask, enc_mask, text_length = self.prepare_llm_input(audio_batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         b = audio_batch['answers'].shape[0]
@@ -405,7 +405,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,))
                 for j in range(l):
                     if dec_mask[i,j]:
-                        enc_dec_attn_mask[i, j,  : (j + waitk_lagging)*pre_decision_ratio] = 1
+                        enc_dec_attn_mask[i, j,  : text_length[i] + (j + waitk_lagging)*pre_decision_ratio] = 1
             # invert mask for Megatron
             enc_dec_attn_mask = enc_dec_attn_mask < 0.5
         else:
@@ -943,22 +943,33 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
 
         batch = to_cuda(batch, non_blocking=True)
-        encoder_input, attention_mask, enc_mask = self.prepare_llm_input(batch)
+        encoder_input, attention_mask, enc_mask, text_length = self.prepare_llm_input(batch)
         # enc_input = speech and text prompt
         # dec_input and label = text output label
         device = batch['audio_signal'].device
 
         inference_config = self.get_inference_config()
-        predicted_token_ids, log_probs = self.frozen_model.decode(
-            tokens_enc=None,
-            enc_mask=enc_mask,
-            num_tokens_to_generate=self._inference_config['tokens_to_generate'],
-            encoder_input=encoder_input,
-            tokenizer=self.tokenizer,
-            bos_id=self.bos_id,
-            sampling_method='wait-k' if 'waitk_lagging' in inference_config and inference_config.waitk_lagging is not None else 'greedy-search',
-            sampling_kwargs=inference_config,
-        )
+        if 'waitk_lagging' in inference_config and inference_config['waitk_lagging'] is not None:
+            predicted_token_ids, log_probs = self.frozen_model.waitk_decode(
+                tokens_enc=None,
+                enc_mask=enc_mask,
+                num_tokens_to_generate=self._inference_config['tokens_to_generate'],
+                encoder_input=encoder_input,
+                tokenizer=self.tokenizer,
+                bos_id=self.bos_id,
+                sampling_method='greedy-search',
+                sampling_kwargs=inference_config,
+                context_length=text_length,
+            )
+        else:
+            predicted_token_ids, log_probs = self.frozen_model.decode(
+                tokens_enc=None,
+                enc_mask=enc_mask,
+                num_tokens_to_generate=self._inference_config['tokens_to_generate'],
+                encoder_input=encoder_input,
+                tokenizer=self.tokenizer,
+                bos_id=self.bos_id,
+            )
 
         # Special ids to text function to handle stripping <eos> and special tokens with sentencepiece tokenizers.
         input_text = batch['contexts']
