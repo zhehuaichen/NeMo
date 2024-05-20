@@ -654,14 +654,15 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             return audio_signal, length
 
     def update_max_seq_length(self, seq_length: int, device):
+        # TODO: this sync seems unnecessary, remove or disable properly later
         # Find global max audio length across all nodes
-        if torch.distributed.is_initialized():
-            global_max_len = torch.tensor([seq_length], dtype=torch.float32, device=device)
+        #if torch.distributed.is_initialized():
+        #    global_max_len = torch.tensor([seq_length], dtype=torch.float32, device=device)
 
-            # Update across all ranks in the distributed system
-            torch.distributed.all_reduce(global_max_len, op=torch.distributed.ReduceOp.MAX)
+        #    # Update across all ranks in the distributed system
+        #    torch.distributed.all_reduce(global_max_len, op=torch.distributed.ReduceOp.MAX)
 
-            seq_length = global_max_len.int().item()
+        #    seq_length = global_max_len.int().item()
 
         if seq_length > self.max_audio_length:
             self.set_max_audio_length(seq_length)
@@ -1053,7 +1054,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
     def change_subsampling_conv_chunking_factor(self, subsampling_conv_chunking_factor: int):
         """
-        Update the conv_chunking_factor (int) 
+        Update the conv_chunking_factor (int)
         Default is 1 (auto)
         Set it to -1 (disabled) or to a specific value (power of 2) if you OOM in the conv subsampling layers
 
@@ -1116,9 +1117,9 @@ class ConformerEncoderAdapter(ConformerEncoder, adapter_mixins.AdapterModuleMixi
 class ConformerMultiLayerFeatureExtractor(NeuralModule, Exportable, AccessMixin):
     """
     A wrapper module that extracts features from multiple layers of a ConformerEncoder,
-    by reusing existing mechanisim for interctc loss. 
+    by reusing existing mechanisim for interctc loss.
     To use it, set `layer_idx_list` to  specify the indices of layers to extract from.
-    Also, you can specify an `aggretator` module to aggregate the features from different layers, default not aggregating. 
+    Also, you can specify an `aggretator` module to aggregate the features from different layers, default not aggregating.
     """
 
     def __init__(
