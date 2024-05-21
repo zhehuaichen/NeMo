@@ -1282,11 +1282,11 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
                 if metric_name == 'rouge':
                     for k, v in metric_result.items():
                         if 'fmeasure' in k:
-                            self.log(metric_log_key + f'_{k}', v.item(), sync_dist=True, batch_size=1)
+                            self.log(metric_log_key + f'_{k}', v.item())
                             logging.info(f"{mode} {metric_name} {k}: {v.item()}")
                     metric_result = metric_result['rouge1_fmeasure']
                 else:
-                    self.log(metric_log_key, metric_result.item(), sync_dist=True, batch_size=1)
+                    self.log(metric_log_key, metric_result.item())
                     logging.info(f"{mode} {metric_name}: {metric_result.item()}")
 
                 metric_fn.reset()
@@ -1327,13 +1327,13 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
             averaged_metric = 0.0 if monitor_mode == 'max' else 1e5
 
         if mode == 'validation':
-            self.log("validation_loss", averaged_loss, batch_size=1, sync_dist=True)
+            self.log("validation_loss", averaged_loss, batch_size=1)
             if averaged_metric is not None:
-                self.log(f"validation_{self.val_metric_name}", averaged_metric, sync_dist=True, batch_size=1)
+                self.log(f"validation_{self.val_metric_name}", averaged_metric)
         elif mode == 'test':
-            self.log("test_loss", averaged_loss, batch_size=1, sync_dist=True)
+            self.log("test_loss", averaged_loss, batch_size=1)
             if averaged_metric is not None:
-                self.log(f"test_{self.test_metric_name}", averaged_metric, sync_dist=True, batch_size=1)
+                self.log(f"test_{self.test_metric_name}", averaged_metric)
 
         # Merge the functionality of previous on_inference_epoch_end() within inference_epoch_end() func here
         app_state = AppState()
