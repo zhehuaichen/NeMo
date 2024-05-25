@@ -98,6 +98,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         context_lengths: torch.Tensor,
         curr_context_length: int,
         compute_attention_mask: bool,
+        **strategy_args,
     ) -> Tuple[List[torch.Tensor], List[int]]:
         # types2use = None
         if step == 0:
@@ -188,6 +189,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             'audio_signal_length': audio_length,
             'tokens': context_tokens,
             'tokens_length': context_lengths,
+            'context_lengths': context_lengths,  # used by waitk
             'labels': context_tokens,
             'loss_mask': None,
         }
@@ -228,6 +230,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         context_lengths: torch.Tensor,
         curr_context_length: int,
         compute_attention_mask: bool,
+        **strategy_args,
     ) -> Tuple[List[torch.Tensor], List[int]]:
         # types2use = None
         self.input_embeds_hidden = self.extra_outputs.get('input_embeds_hidden', None)
@@ -251,10 +254,24 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             decoder_mems_list = self.extra_outputs.get('decoder_mems_list', None)
             if decoder_mems_list is not None:
                 decoder_mems_list = decoder_mems_list[:, :, : curr_context_length - 1]
+            if 'waitk_lagging' in strategy_args:
+                waitk_lagging = strategy_args['waitk_lagging']
+                pre_decision_ratio = strategy_args['pre_decision_ratio']
+                # for now only support sharing the same text context for a batch 
+                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                i = curr_context_length - context_lengths
+                i = i[0]
+                cur_src_len = pre_decision_ratio * (i + waitk_lagging)
+                cur_speech_encoded = speech_encoded[:, :cur_src_len]
+                cur_speech_encoded_len = torch.minimum(speech_encoded_len, cur_src_len)
+            else:
+                cur_speech_encoded = speech_encoded
+                cur_speech_encoded_len = speech_encoded_len
+
             # need to use audio_ratio field if to support text-only decoding
             embeddings2use, self.extra_outputs = self.model.perception_cross_attn(
-                speech_encoded,
-                speech_encoded_len,
+                cur_speech_encoded,
+                cur_speech_encoded_len,
                 embeddings2use,
                 input_embeds_hidden=self.input_embeds_hidden,
                 decoder_mems_list=decoder_mems_list,

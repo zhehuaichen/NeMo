@@ -163,6 +163,7 @@ class TransformerDecoder(nn.Module):
         decoder_mems_list=None,
         return_mems=False,
         return_mems_as_list=True,
+        enc_dec_attn_mask=None,
     ):
         """
         Args:
@@ -178,7 +179,10 @@ class TransformerDecoder(nn.Module):
             return_mems_as_list: bool, when True, mems returned are as a list; otherwise mems are Tensor
         """
         decoder_attn_mask = form_attention_mask(decoder_mask, diagonal=self.diagonal)
-        encoder_attn_mask = form_attention_mask(encoder_mask)
+        if enc_dec_attn_mask is not None:
+            encoder_attn_mask = enc_dec_attn_mask
+        else:
+            encoder_attn_mask = form_attention_mask(encoder_mask)
         memory_states = self._get_memory_states(decoder_states, decoder_mems_list, 0)
         if return_mems_as_list:
             cached_mems_list = [memory_states]

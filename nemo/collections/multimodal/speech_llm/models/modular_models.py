@@ -600,9 +600,15 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
         with open_dict(gpt_cfg):
             # for AudioGPTLoRAModel
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
-            gpt_cfg.perception = cfg.model.perception
+            import copy
+            gpt_cfg.perception = copy.deepcopy(cfg.model.perception)
+            gpt_cfg.streaming = cfg.model.get("streaming", None)
             # inject audio encoder configs into the target config (gpt_cfg)
             cls._modify_audio_encoder_config(gpt_cfg, audio_cfg, speaker_cfg)
+            # overwrite encoder config
+            if hasattr(cfg.model.perception, 'encoder'):
+                for k, v in cfg.model.perception.encoder.items():
+                    setattr(gpt_cfg.perception.encoder, k, v)
 
             # inject the sample rate from the audio encoder into the gpt config
             if isinstance(audio_cfg, (ListConfig, list)):
@@ -1487,9 +1493,35 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             processed_signal_length=None,
         )
         input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
+        # b l t
+        b, l = input_ids.shape
+        t= encoded.shape[1]
+        NEG_INF = -10000.0
+        if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
+            # sample waitk in training and eval stage
+            waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
+            waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
+            pre_decision_ratio = self.cfg.streaming.get('pre_decision_ratio', 8)
+            enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
+            for i in range(b):
+                waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)
+                context_length = audio_batch['context_lengths'][i]
+                # skip context 
+                for j in range(context_length, l):
+                    if j < input_length[i]:
+                        enc_dec_attn_mask[i, j,  : (j + waitk_lagging - context_length)*pre_decision_ratio] = 1
+            enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
+            enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
+        else:
+            enc_dec_attn_mask = None
         encoder_input, extra_outputs = self.perception_cross_attn(
-            encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True
+            encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
         )
+        if 'waitk_lagging' in self.get_inference_config():  
+            # to avoid info leakage, do not attend to acoustic emb for the text context in inference time
+            for i in range(b):
+                context_length = audio_batch['context_lengths'][i]
+                encoder_input[i, :context_length] = input_embeds[i, :context_length]
         if 'audio_ratio' in audio_batch:
             audio_ratio = audio_batch['audio_ratio'][..., None, None]
             encoder_input = encoder_input * audio_ratio + input_embeds * (1 - audio_ratio)
