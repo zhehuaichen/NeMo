@@ -1493,35 +1493,50 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             processed_signal_length=None,
         )
         input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
-        # b l t
-        b, l = input_ids.shape
-        t= encoded.shape[1]
-        NEG_INF = -10000.0
-        if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
-            # sample waitk in training and eval stage
-            waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
-            waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
-            pre_decision_ratio = self.cfg.streaming.get('pre_decision_ratio', 8)
-            enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
-            for i in range(b):
-                waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)
-                context_length = audio_batch['context_lengths'][i]
-                # skip context 
-                for j in range(context_length, l):
-                    if j < input_length[i]:
-                        enc_dec_attn_mask[i, j,  : (j + waitk_lagging - context_length)*pre_decision_ratio] = 1
-            enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
-            enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
-        else:
-            enc_dec_attn_mask = None
-        encoder_input, extra_outputs = self.perception_cross_attn(
-            encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
-        )
-        if 'waitk_lagging' in self.get_inference_config():  
-            # to avoid info leakage, do not attend to acoustic emb for the text context in inference time
-            for i in range(b):
-                context_length = audio_batch['context_lengths'][i]
-                encoder_input[i, :context_length] = input_embeds[i, :context_length]
+        if 'waitk_lagging' not in self.get_inference_config():   
+            encoder_input, extra_outputs = self.perception_cross_attn(
+                encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True,
+            )
+        else:  # waitk training/eval or inference 
+            if 'answers' in audio_batch:  # training/eval
+                original_input_embeds = input_embeds
+                original_input_length = input_length
+                # waitk training/eval
+                if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
+                    input_embeds = self._get_text_embeddings(audio_batch['answers'], None).transpose(0, 1)
+                    input_length = audio_batch['tokens_length'] - audio_batch['context_lengths']
+                    # b l t
+                    b, l, _ = input_embeds.shape
+                    t= encoded.shape[1]
+                    NEG_INF = -10000.0
+                    # sample waitk in training and eval stage
+                    waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
+                    waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
+                    pre_decision_ratio = self.cfg.streaming.get('pre_decision_ratio', 8)
+                    enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
+                    for i in range(b):
+                        waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)
+                        for j in range(l):
+                            if j < input_length[i]:
+                                enc_dec_attn_mask[i, j,  : (j + waitk_lagging)*pre_decision_ratio] = 1
+                    enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
+                    enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
+                    encoder_input, extra_outputs = self.perception_cross_attn(
+                        encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
+                    )
+                    context_embeds = self._get_text_embeddings(audio_batch['contexts'], None).transpose(0, 1)
+                    encoder_input, input_length = self._concat_features(context_embeds, audio_batch['context_lengths'], encoder_input, input_length)
+                    assert torch.equal(input_length, original_input_length)
+                    input_embeds = original_input_embeds
+                    encoder_input = encoder_input[:, :original_input_embeds.shape[1]]
+                else:  # waitk eval w/o waitk training in the ckpt
+                    encoder_input, extra_outputs = self.perception_cross_attn(
+                        encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True,
+                    )
+            else:  # waitk inference
+                # make sure no information leakage in text prompt
+                encoder_input, extra_outputs = input_embeds, {}
+                    
         if 'audio_ratio' in audio_batch:
             audio_ratio = audio_batch['audio_ratio'][..., None, None]
             encoder_input = encoder_input * audio_ratio + input_embeds * (1 - audio_ratio)
