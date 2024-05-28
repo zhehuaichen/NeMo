@@ -1497,14 +1497,14 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             encoder_input, extra_outputs = self.perception_cross_attn(
                 encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True,
             )
-        else:  # waitk training/eval or inference 
+        else:  # am xattn only in answer emb, used in waitk training/eval/inference 
             if 'answers' in audio_batch:  # training/eval
                 original_input_embeds = input_embeds
                 original_input_length = input_length
-                # waitk training/eval
+                input_embeds = self._get_text_embeddings(audio_batch['answers'], None).transpose(0, 1)
+                input_length = audio_batch['tokens_length'] - audio_batch['context_lengths']    
+                # waitk sampling training/eval
                 if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
-                    input_embeds = self._get_text_embeddings(audio_batch['answers'], None).transpose(0, 1)
-                    input_length = audio_batch['tokens_length'] - audio_batch['context_lengths']
                     # b l t
                     b, l, _ = input_embeds.shape
                     t= encoded.shape[1]
@@ -1521,18 +1521,16 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
                                 enc_dec_attn_mask[i, j,  : (j + waitk_lagging)*pre_decision_ratio] = 1
                     enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
                     enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
-                    encoder_input, extra_outputs = self.perception_cross_attn(
-                        encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
-                    )
-                    context_embeds = self._get_text_embeddings(audio_batch['contexts'], None).transpose(0, 1)
-                    encoder_input, input_length = self._concat_features(context_embeds, audio_batch['context_lengths'], encoder_input, input_length)
-                    assert torch.equal(input_length, original_input_length)
-                    input_embeds = original_input_embeds
-                    encoder_input = encoder_input[:, :original_input_embeds.shape[1]]
-                else:  # waitk eval w/o waitk training in the ckpt
-                    encoder_input, extra_outputs = self.perception_cross_attn(
-                        encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True,
-                    )
+                else:  # w/o waitk sampling, still train/eval w/ am xattn only in answer emb 
+                    enc_dec_attn_mask = None
+                encoder_input, extra_outputs = self.perception_cross_attn(
+                    encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
+                )
+                context_embeds = self._get_text_embeddings(audio_batch['contexts'], None).transpose(0, 1)
+                encoder_input, input_length = self._concat_features(context_embeds, audio_batch['context_lengths'], encoder_input, input_length)
+                assert torch.equal(input_length, original_input_length)
+                input_embeds = original_input_embeds
+                encoder_input = encoder_input[:, :original_input_embeds.shape[1]]
             else:  # waitk inference
                 # make sure no information leakage in text prompt
                 encoder_input, extra_outputs = input_embeds, {}
