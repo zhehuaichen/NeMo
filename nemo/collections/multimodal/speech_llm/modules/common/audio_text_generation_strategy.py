@@ -40,6 +40,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        **strategy_args,
     ):
         """initialize the batch data before the inference steps."""
         # Move to GPU.
@@ -181,44 +182,37 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        **strategy_args,
     ):
         """initialize the batch data before the inference steps."""
         # Move to GPU.
+        cl = context_lengths[0]
+        assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
         batch = {
             'audio_signal': audio_signal,
             'audio_signal_length': audio_length,
             'tokens': context_tokens,
+            'contexts': context_tokens,
             'tokens_length': context_lengths,
             'context_lengths': context_lengths,  # used by waitk
+            'extended_answer_ids': context_tokens[:,cl-1:cl],
             'labels': context_tokens,
             'loss_mask': None,
         }
-        if self.model.perception.cfg.get('combine_return', True):
-            (
-                encoder_input,
-                self.attention_mask,
-                context_tokens,
-                _,
-                (speech_encoded, speech_encoded_len, extra_outputs),
-            ) = self.model.prepare_llm_input(batch)
-            self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
-            self.extra_outputs = extra_outputs
-            return (
-                context_tokens,
-                (encoder_input, speech_encoded, speech_encoded_len),
-                torch.zeros_like(context_lengths),
-            )
-        else:
-            (
-                encoder_input,
-                self.attention_mask,
-                context_tokens,
-                _,
-                (speech_encoded, speech_encoded_len, llm_encoded_len, extra_outputs),
-            ) = self.model.prepare_llm_input(batch)
-            self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
-            self.extra_outputs = extra_outputs
-            return context_tokens, (encoder_input, speech_encoded, speech_encoded_len), llm_encoded_len
+        (
+            encoder_input,
+            self.attention_mask,
+            context_tokens,
+            _,
+            (speech_encoded, speech_encoded_len, extra_outputs),
+        ) = self.model.prepare_llm_input(batch, **strategy_args)
+        self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
+        self.extra_outputs = extra_outputs
+        return (
+            context_tokens,
+            (encoder_input, speech_encoded, speech_encoded_len),
+            torch.zeros_like(context_lengths),
+        )
 
     def prepare_batch_at_step(
         self,
@@ -260,7 +254,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                 # for now only support sharing the same text context for a batch 
                 assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
                 i = curr_context_length - context_lengths
-                i = i[0]
+                i = i[0] + 1  # the last token of context is the input of the first xattn in extended_answer_ids
                 cur_src_len = pre_decision_ratio * (i + waitk_lagging)
                 cur_speech_encoded = speech_encoded[:, :cur_src_len]
                 cur_speech_encoded_len = torch.minimum(speech_encoded_len, cur_src_len)

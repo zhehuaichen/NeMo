@@ -217,12 +217,14 @@ class TextProcessing:
             if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
                 masked_input_ids = masked_input_ids[: self.max_seq_length]
 
+        extended_answer_ids = [context_ids[-1]] + answer_ids
         processed_example = {
             'input_ids': torch.as_tensor(input_ids),
             'answer_start_idx': torch.as_tensor(answer_start_idx),
             'context_ids': torch.as_tensor(context_ids),
             'context_length': len(context_ids),
             'answer_ids': torch.as_tensor(answer_ids),
+            'extended_answer_ids': torch.as_tensor(extended_answer_ids),
         }
 
         if self.input_text_mask_ratio is not None and self.input_text_mask_ratio > 0:
@@ -459,6 +461,7 @@ def collate_text_data(
         "contexts": collate_vectors(fields["context_ids"], max_length=max_length, padding_value=pad_id),
         "context_lengths": torch.LongTensor([len(seq) for seq in fields["context_ids"]]),
         "answers": collate_vectors(fields["answer_ids"], max_length=max_length, padding_value=pad_id),
+        "extended_answer_ids": collate_vectors(fields["extended_answer_ids"], max_length=max_length, padding_value=pad_id),
         "max_length": torch.LongTensor([max_length] * batch_size),
     }
 

@@ -554,6 +554,7 @@ def sample_sequence_batch(
             compute_attention_mask,
             num_audios,
             context_start_idx,
+            **strategy_args,
         )
         audio_text_context_lengths = context_lengths + audio_feat_lens
         context_length = audio_text_context_lengths.min().item()
