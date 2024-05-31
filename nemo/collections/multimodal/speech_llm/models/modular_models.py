@@ -91,6 +91,11 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
             )
 
         if self._cfg.get('tensor_model_parallel_size', 1) == 1:
+            import copy
+            cfg = copy.deepcopy(cfg)
+            # pretrained_canary_model is used to decide tokenizer 
+            # while pretrained_audio_model for encoder architecture and weights
+            cfg.pretrained_audio_model = cfg.get("pretrained_canary_model", cfg.pretrained_audio_model)
             audio_model, _ = self.get_audio_encoder_models_and_configs(cfg)
             self.perception.tokenizer = audio_model.tokenizer
 
@@ -708,7 +713,7 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
     def load_pretrained_audio_weights(
         cls, cfg, model, audio_model, speaker_model: Optional[EncDecSpeakerLabelModel] = None
     ):
-        model.perception.tokenizer = audio_model.tokenizer
+        # model.perception.tokenizer = audio_model.tokenizer
         use_multi_encoder = cfg.model.perception.get("encoders", None) is not None
         if not use_multi_encoder:
             if cfg.model.perception.get("use_multi_layer_feat", False):

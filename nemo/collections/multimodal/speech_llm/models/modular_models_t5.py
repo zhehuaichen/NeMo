@@ -85,9 +85,6 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
     def setup_perception_modules(self, cfg):
         if 'target' in cfg.perception:
             imported_cls = model_utils.import_class_by_path(cfg.perception.target)
-            pretrained_audio_model = (
-                cfg.pretrained_canary_model if hasattr(cfg, "pretrained_canary_model") else cfg.pretrained_audio_model
-            )
             self.perception = imported_cls(cfg=cfg.perception)
         else:
             self.perception = (
@@ -95,7 +92,9 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 if "encoders" not in cfg.perception
                 else MultiAudioPerceptionModule(cfg=cfg.perception)
             )
-        audio_model = self.load_audio_model(cfg.pretrained_audio_model)
+        # pretrained_canary_model is used to decide tokenizer 
+        # while pretrained_audio_model for encoder architecture and weights
+        audio_model = self.load_audio_model(cfg.get("pretrained_canary_model", cfg.pretrained_audio_model))
         self.perception.tokenizer = audio_model.tokenizer
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
@@ -576,6 +575,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
             gpt_cfg.perception = copy.deepcopy(cfg.model.perception)
             gpt_cfg.pretrained_audio_model = cfg.model.get('pretrained_audio_model', None)
+            gpt_cfg.pretrained_canary_model = cfg.model.get('pretrained_canary_model', None)
             gpt_cfg.perception.preprocessor = audio_cfg.preprocessor
             gpt_cfg.perception.encoder = audio_cfg.encoder
             if hasattr(cfg.model.perception, 'encoder'):
@@ -646,7 +646,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             restore_path=cfg.model.language_model_path, trainer=trainer, override_config_path=model_cfg, strict=False,
         )
         # load am
-        model.perception.tokenizer = audio_model.tokenizer
+        # model.perception.tokenizer = audio_model.tokenizer
         if cfg.model.get('load_audio_encoder', True):
             model.perception.encoder.load_state_dict(
                 audio_model.encoder.state_dict(), strict='adapter' not in cfg.model.perception
