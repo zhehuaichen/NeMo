@@ -1520,13 +1520,13 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             else:  # w/o waitk sampling, still train/eval w/ am xattn only in answer emb 
                 waitk_lagging_max = 2  # temp
                 waitk_lagging_min = 1
-                if 'pre_decision_ratio' in kwargs:
+                if 'pre_decision_ratio' in kwargs and kwargs['pre_decision_ratio'] is not '':
                     pre_decision_ratio = kwargs['pre_decision_ratio']
                 else:
                     pre_decision_ratio = 10000  # non streaming
             enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
             for i in range(b):
-                if 'waitk_lagging' in kwargs:
+                if 'waitk_lagging' in kwargs and kwargs['waitk_lagging'] is not '':
                     waitk_lagging = kwargs['waitk_lagging']
                 else:
                     waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)
