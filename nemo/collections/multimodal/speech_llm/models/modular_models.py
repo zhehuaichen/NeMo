@@ -1505,11 +1505,10 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
         else:  # am xattn only in answer emb, used in waitk training/eval/inference 
             # empty fixed feature for attention masking
             encoded = torch.cat([encoded, torch.zeros_like(encoded[:,:1])], dim=1)
-            
+            # b l t
+            b, l, _ = input_embeds.shape
+            t= encoded.shape[1]
             if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
-                # b l t
-                b, l, _ = input_embeds.shape
-                t= encoded.shape[1]
                 NEG_INF = -10000.0
                 # sample waitk in training and eval stage
                 waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
