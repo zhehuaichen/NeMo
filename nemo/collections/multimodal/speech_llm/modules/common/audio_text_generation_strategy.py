@@ -195,7 +195,6 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             'contexts': context_tokens,
             'tokens_length': context_lengths,
             'context_lengths': context_lengths,  # used by waitk
-            'extended_answer_ids': context_tokens[:,cl-1:cl],
             'labels': context_tokens,
             'loss_mask': None,
         }
