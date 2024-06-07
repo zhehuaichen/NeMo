@@ -575,7 +575,8 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.target = f"{cls.__module__}.{cls.__name__}"
             gpt_cfg.perception = copy.deepcopy(cfg.model.perception)
             gpt_cfg.pretrained_audio_model = cfg.model.get('pretrained_audio_model', None)
-            gpt_cfg.pretrained_canary_model = cfg.model.get('pretrained_canary_model', None)
+            if hasattr(cfg.model, 'pretrained_canary_model'):
+                gpt_cfg.pretrained_canary_model = cfg.model.pretrained_canary_model
             gpt_cfg.perception.preprocessor = audio_cfg.preprocessor
             gpt_cfg.perception.encoder = audio_cfg.encoder
             if hasattr(cfg.model.perception, 'encoder'):
