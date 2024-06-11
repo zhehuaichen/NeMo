@@ -167,3 +167,59 @@ def to_cuda(inputs, non_blocking=True):
         return inputs.__class__([to_cuda(x, non_blocking) for x in inputs])
     else:
         return inputs
+
+def compute_al(delays, source_length, target_length):
+    if delays[0] > source_length:
+        return delays[0]
+
+    AL = 0
+    gamma = target_length / source_length
+    tau = 0
+    for t_minus_1, d in enumerate(delays):
+        AL += d - t_minus_1 / gamma
+        tau = t_minus_1 + 1
+
+        if d >= source_length:
+            break
+    AL /= tau
+    return AL
+
+def compute_laal(delays, source_length, target_length):
+    if delays[0] > source_length:
+        return delays[0]
+
+    LAAL = 0
+    gamma = max(len(delays), target_length) / source_length
+    tau = 0
+    for t_minus_1, d in enumerate(delays):
+        LAAL += d - t_minus_1 / gamma
+        tau = t_minus_1 + 1
+
+        if d >= source_length:
+            break
+    LAAL /= tau
+    return LAAL
+
+def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args, tokenizer, BOW_PREFIX = "\u2581"):
+    waitk_lagging = strategy_args['waitk_lagging']
+    pre_decision_ratio = strategy_args['pre_decision_ratio']
+    target_length = [len(a.tolist()) - a.tolist().count(tokenizer.eos_id) + 1 for a in batch['answers']]
+    target_length_word = [len(a.split()) for a in labels_text]
+    for i, tokens in enumerate(predicted_token_ids):
+        lagging = []
+        audio_signal_length = batch['audio_signal_length'][i] * 1000  # convert to ms
+        audio_signal_length = audio_signal_length // strategy_args.get('sample_rate', 16000)
+        audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
+        for j, cur_t in enumerate(tokens):
+            cur_src_len = (j + waitk_lagging) * pre_decision_ratio
+            cur_src_len*=audio_encoder_fs
+            cur_src_len = min(audio_signal_length, cur_src_len)
+            spm = tokenizer.vocab[cur_t]
+            # reach word boundary
+            if (spm.startswith(BOW_PREFIX) and spm != BOW_PREFIX) or cur_t == tokenizer.eos_id:  # word boundary
+                lagging.append(cur_src_len)
+            if cur_t == tokenizer.eos_id:
+                break
+        metadata[i]['LAAL'] = compute_laal(lagging, audio_signal_length, target_length_word[i]).tolist()
+        metadata[i]['AL'] = compute_al(lagging, audio_signal_length, target_length_word[i]).tolist()
+    return metadata

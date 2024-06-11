@@ -38,7 +38,7 @@ from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     AudioPerceptionModule,
     MultiAudioPerceptionModule,
 )
-from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import get_nested_dict_value
+from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import get_nested_dict_value, compute_waitk_lagging
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import MegatronGPTSFTModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
@@ -1091,11 +1091,23 @@ class ModularAudioGPTModel(MegatronGPTSFTModel):
             preds_text = [remove_punctuations(p.lower(), data_cfg.get("punctuations", None)) for p in preds_text]
             labels_text = [remove_punctuations(l.lower(), data_cfg.get("punctuations", None)) for l in labels_text]
 
+        strategy_args = self.get_inference_config()
+        if 'waitk_lagging' in strategy_args:
+            context_lengths = batch['context_lengths']
+            assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+            predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
+            metadata = compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args,  self.tokenizer)
+
+
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
                 logging.info(f"Input: `{inputs_text[0]}`")
                 logging.info(f"Label: `{labels_text[0]}`")
                 logging.info(f"Pred: `{preds_text[0]}`")
+                if 'LAAL' in metadata[0]:
+                    logging.info(f"LAAL: {metadata[0]['LAAL']}")
+                if 'AL' in metadata[0]:
+                    logging.info(f"AL: {metadata[0]['AL']}")
 
         # if loss is nan, print the input, label and pred
         if loss.isnan():
@@ -1520,13 +1532,13 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             else:  # w/o waitk sampling, still train/eval w/ am xattn only in answer emb 
                 waitk_lagging_max = 2  # temp
                 waitk_lagging_min = 1
-                if 'pre_decision_ratio' in kwargs and kwargs['pre_decision_ratio'] is not '':
+                if 'pre_decision_ratio' in kwargs:
                     pre_decision_ratio = kwargs['pre_decision_ratio']
                 else:
                     pre_decision_ratio = 10000  # non streaming
             enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
             for i in range(b):
-                if 'waitk_lagging' in kwargs and kwargs['waitk_lagging'] is not '':
+                if 'waitk_lagging' in kwargs:
                     waitk_lagging = kwargs['waitk_lagging']
                 else:
                     waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)

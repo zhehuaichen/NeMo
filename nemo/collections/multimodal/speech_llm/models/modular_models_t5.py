@@ -33,7 +33,7 @@ from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     AudioPerceptionModule,
     MultiAudioPerceptionModule,
 )
-from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import to_cuda
+from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import to_cuda, compute_waitk_lagging
 from nemo.collections.nlp.models.language_modeling.megatron_t5_adapter_model import MegatronT5LoraModel
 from nemo.collections.nlp.models.language_modeling.megatron_t5_sft_model import MegatronT5SFTModel
 from nemo.collections.nlp.models.nlp_model import NLPModel
@@ -913,11 +913,17 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         inputs_text = [self.tokenizer.ids_to_text(c.tolist()) for c in batch['contexts']]
         labels_text = [self.tokenizer.ids_to_text(a.tolist()) for a in batch['answers']]
         preds_text = output['preds_text']
+        if 'waitk_lagging' in self._inference_config:
+            metadata = compute_waitk_lagging(batch, output['token_ids'], metadata, labels_text, self._inference_config, self.tokenizer)
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
                 logging.info(f"Input: `{inputs_text[0]}`")
                 logging.info(f"Label: `{labels_text[0]}`")
                 logging.info(f"Pred: `{preds_text[0]}`")
+                if 'LAAL' in metadata[0]:
+                    logging.info(f"LAAL: {metadata[0]['LAAL']}")
+                if 'AL' in metadata[0]:
+                    logging.info(f"AL: {metadata[0]['AL']}")
 
         outputs = {
             'loss': loss,
@@ -987,6 +993,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             'input_text': input_text,
             'preds_text': preds_text,
             'labels_text': labels_text,
+            'token_ids': predicted_token_ids,
         }
 
     def on_test_epoch_end(self):
