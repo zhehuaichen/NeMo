@@ -1241,6 +1241,12 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
                 # for now only support sharing the same text context for a batch 
                 assert torch.equal(context_length, torch.ones_like(context_length) * context_length[0])
                 cur_src_len += context_length[0]
+            if 'recompute_encoder' in sampling_kwargs:
+                cur_enc_mask = enc_mask[:, :cur_src_len]
+                cur_encoder_input = encoder_input[:, :cur_src_len]
+                enc_output = self.encode(
+                    tokens_enc=tokens_enc, enc_mask=cur_enc_mask, encoder_input=cur_encoder_input, reconfigure_microbatch=False
+                )
             cur_enc_output_attn_mask = enc_output_attn_mask[:, :cur_src_len]
             cur_enc_output = enc_output[:, :cur_src_len]
             batch_for_pipeline = [cur_enc_output, cur_enc_output_attn_mask, predicted_tokens_dec, dec_mask, batch_data]
