@@ -173,6 +173,59 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
 
 
 class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
+    def init_batch_per_step(self, 
+        step: int,
+        **strategy_args,
+    ):
+        """initialize the batch data before the inference steps."""
+        # Move to GPU.
+        context_lengths = self.context_lengths
+        cl = context_lengths[0]
+        assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
+        audio_length = self.audio_length
+        audio_signal = self.audio_signal[:]
+        if 'waitk_lagging' in strategy_args and 'recompute_encoder' in strategy_args:
+            waitk_lagging = strategy_args['waitk_lagging']
+            pre_decision_ratio = strategy_args['pre_decision_ratio']
+            sample_rate = strategy_args.get('sample_rate', 16000)
+            audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
+            # for now only support sharing the same text context for a batch 
+            cur_enc_len = pre_decision_ratio * (step+waitk_lagging)
+            cur_src_len = cur_enc_len * audio_encoder_fs * sample_rate // 1000
+            audio_signal = audio_signal[:, :cur_src_len]
+            import numpy as np
+            #sil_pad_len = int(sample_rate * 0.5)
+            #audio_signal = torch.cat([audio_signal, audio_signal[:,:sil_pad_len]], dim=1)
+            #cur_src_len += sil_pad_len
+            audio_length = torch.minimum(audio_length, torch.from_numpy(np.array([cur_src_len])).to(audio_length.device))
+        batch = {
+            'audio_signal': audio_signal,
+            'audio_signal_length': audio_length,
+            'tokens': self.context_tokens,
+            'contexts': self.context_tokens,
+            'tokens_length': context_lengths,
+            'context_lengths': context_lengths,  # used by waitk
+            'labels': self.context_tokens,
+            'loss_mask': None,
+        }
+        (
+            encoder_input,
+            self.attention_mask,
+            context_tokens,
+            _,
+            (speech_encoded, speech_encoded_len, extra_outputs),
+        ) = self.model.prepare_llm_input(batch, **strategy_args)
+        #if 'waitk_lagging' in strategy_args and 'recompute_encoder' in strategy_args:
+        #    speech_encoded_len = torch.minimum(speech_encoded_len, torch.from_numpy(np.array([cur_enc_len-10])).to(speech_encoded_len.device))
+        #    speech_encoded = speech_encoded[:, :cur_enc_len-10]
+        self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
+        self.extra_outputs = extra_outputs
+        return (
+            context_tokens,
+            (encoder_input, speech_encoded, speech_encoded_len),
+            torch.zeros_like(context_lengths),
+        )
+        
     def init_batch(
         self,
         context_tokens: torch.Tensor,
@@ -184,34 +237,16 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         context_start_idx: Optional[List[List[int]]] = None,
         **strategy_args,
     ):
-        """initialize the batch data before the inference steps."""
-        # Move to GPU.
-        cl = context_lengths[0]
-        assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
-        batch = {
-            'audio_signal': audio_signal,
-            'audio_signal_length': audio_length,
-            'tokens': context_tokens,
-            'contexts': context_tokens,
-            'tokens_length': context_lengths,
-            'context_lengths': context_lengths,  # used by waitk
-            'labels': context_tokens,
-            'loss_mask': None,
-        }
-        (
-            encoder_input,
-            self.attention_mask,
-            context_tokens,
-            _,
-            (speech_encoded, speech_encoded_len, extra_outputs),
-        ) = self.model.prepare_llm_input(batch, **strategy_args)
-        self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
-        self.extra_outputs = extra_outputs
-        return (
-            context_tokens,
-            (encoder_input, speech_encoded, speech_encoded_len),
-            torch.zeros_like(context_lengths),
+        self.audio_signal = audio_signal[:]
+        self.audio_length = audio_length[:]
+        self.context_tokens = context_tokens[:]
+        self.context_lengths = context_lengths[:]
+        
+        return self.init_batch_per_step(
+            1, 
+            **strategy_args
         )
+        
 
     def prepare_batch_at_step(
         self,
@@ -255,8 +290,17 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                 i = curr_context_length - context_lengths
                 i = i[0] + 1  # the last token of context is the input of the first xattn in extended_answer_ids
                 cur_src_len = pre_decision_ratio * (i + waitk_lagging)
-                cur_speech_encoded = speech_encoded[:, :cur_src_len]
-                cur_speech_encoded_len = torch.minimum(speech_encoded_len, cur_src_len)
+                if 'recompute_encoder' not in strategy_args:
+                    cur_speech_encoded = speech_encoded[:, :cur_src_len]
+                    cur_speech_encoded_len = torch.minimum(speech_encoded_len, cur_src_len)
+                else:
+                    (
+                        _,
+                        (_, cur_speech_encoded, cur_speech_encoded_len),
+                        _
+                    ) = self.init_batch_per_step(
+                        step+1,  **strategy_args
+                    )
             else:
                 cur_speech_encoded = speech_encoded
                 cur_speech_encoded_len = speech_encoded_len
