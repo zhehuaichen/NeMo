@@ -205,13 +205,14 @@ def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, str
     pre_decision_ratio = strategy_args['pre_decision_ratio']
     target_length = [len(a.tolist()) - a.tolist().count(tokenizer.eos_id) + 1 for a in batch['answers']]
     target_length_word = [len(a.split()) for a in labels_text]
+    right_context = strategy_args.get('right_context', 13)
     for i, tokens in enumerate(predicted_token_ids):
         lagging = []
         audio_signal_length = batch['audio_signal_length'][i] * 1000  # convert to ms
         audio_signal_length = audio_signal_length // strategy_args.get('sample_rate', 16000)
         audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
         for j, cur_t in enumerate(tokens):
-            cur_src_len = (j + waitk_lagging) * pre_decision_ratio
+            cur_src_len = (j + waitk_lagging) * pre_decision_ratio + right_context
             cur_src_len*=audio_encoder_fs
             cur_src_len = min(audio_signal_length, cur_src_len)
             spm = tokenizer.vocab[cur_t]

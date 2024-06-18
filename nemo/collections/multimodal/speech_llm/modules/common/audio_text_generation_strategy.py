@@ -188,15 +188,13 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             waitk_lagging = strategy_args['waitk_lagging']
             pre_decision_ratio = strategy_args['pre_decision_ratio']
             sample_rate = strategy_args.get('sample_rate', 16000)
+            right_context = strategy_args.get('right_context', 13)
             audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
             # for now only support sharing the same text context for a batch 
             cur_enc_len = pre_decision_ratio * (step+waitk_lagging)
-            cur_src_len = cur_enc_len * audio_encoder_fs * sample_rate // 1000
+            cur_src_len = (cur_enc_len + right_context) * audio_encoder_fs * sample_rate // 1000
             audio_signal = audio_signal[:, :cur_src_len]
             import numpy as np
-            #sil_pad_len = int(sample_rate * 0.5)
-            #audio_signal = torch.cat([audio_signal, audio_signal[:,:sil_pad_len]], dim=1)
-            #cur_src_len += sil_pad_len
             audio_length = torch.minimum(audio_length, torch.from_numpy(np.array([cur_src_len])).to(audio_length.device))
         batch = {
             'audio_signal': audio_signal,
@@ -215,9 +213,9 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             _,
             (speech_encoded, speech_encoded_len, extra_outputs),
         ) = self.model.prepare_llm_input(batch, **strategy_args)
-        #if 'waitk_lagging' in strategy_args and 'recompute_encoder' in strategy_args:
-        #    speech_encoded_len = torch.minimum(speech_encoded_len, torch.from_numpy(np.array([cur_enc_len-10])).to(speech_encoded_len.device))
-        #    speech_encoded = speech_encoded[:, :cur_enc_len-10]
+        if 'waitk_lagging' in strategy_args and 'recompute_encoder' in strategy_args:
+            speech_encoded_len = torch.minimum(speech_encoded_len, torch.from_numpy(np.array([cur_enc_len])).to(speech_encoded_len.device))
+            speech_encoded = speech_encoded[:, :cur_enc_len]
         self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
         self.extra_outputs = extra_outputs
         return (
