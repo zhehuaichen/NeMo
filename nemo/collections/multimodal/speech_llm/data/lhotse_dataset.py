@@ -233,26 +233,41 @@ class TextProcessing:
         return processed_example
 
 
-def convert_canary_prompt_to_text(prompt, is_canary_tokens_augment):
-    ps = prompt.replace("<pad>", "").split('>')
+def convert_canary_prompt_to_text(cut, is_canary_tokens_augment):
+    taskname = cut.custom['taskname']
+    pnc = cut.custom['pnc']
+    source_lang = cut.custom['source_lang']
+    target_lang = cut.custom['target_lang']
 
     def get_lang(text):
-        if text == "<|fr|":
+        if text == "fr":
             lang = 'French'
-        elif text == "<|es|":
+        elif text == "es":
             lang = 'Spanish'
-        elif text == "<|de|":
+        elif text == "de":
             lang = 'German'
-        elif text == "<|en|":
+        elif text == "en":
             lang = 'English'
+        elif text == "cs":
+            lang = 'Czech'
+        elif text == "ja":
+            lang = 'Japanese'
+        elif text == "hi":
+            lang = 'Hindi'
+        elif text == "ru":
+            lang = 'Russian'
+        elif text == "uk":
+            lang = 'Ukrainian'
+        elif text == "zh":
+            lang = 'Chinese'
         else:
-            assert False, 'Unknown language {}'.format(prompt)
+            assert False, 'Unknown language {}'.format(text)
         return lang
 
     def get_task_template(text, is_canary_tokens_augment, simple_augment=True):
-        if text == "<|transcribe|":
+        if text == "transcribe" or text == 'asr':
             template = 'Transcribe the spoken content to written <|SLANG|> text, <|PNC|>.'
-        elif text == "<|translate|":
+        elif text == "translate" or text == 's2t_translation' or text=='ast':
             if is_canary_tokens_augment:
                 if simple_augment:
                     template = 'Transcribe the spoken content to written <|SLANG|> text, then translate this to <|TLANG|> text, <|PNC|>'
@@ -261,28 +276,25 @@ def convert_canary_prompt_to_text(prompt, is_canary_tokens_augment):
             else:
                 template = 'Translate the spoken <|SLANG|> content to written <|TLANG|> text, <|PNC|>'
         else:
-            assert False, 'Unknown task {}'.format(prompt)
+            assert False, 'Unknown task {}'.format(text)
         return template
 
     def get_pnc(text):
-        if text == "<|nopnc|":
+        if text == "no" or text=='false':
             pnc = 'ignoring punctuations and capitalization'
-        elif text == "<|pnc|":
+        elif text == "yes" or text=='true':
             pnc = 'with punctuations and capitalizations'
         else:
-            assert False, 'Unknown pnc {}'.format(prompt)
+            assert False, 'Unknown pnc {}'.format(text)
         return pnc
 
-    if len(ps) == 6:
-        source_lang = get_lang(ps[1])
-        target_lang = get_lang(ps[3])
-        pnc = get_pnc(ps[4])
-        task = get_task_template(ps[2], is_canary_tokens_augment)
-        task = task.replace('<|SLANG|>', source_lang)
-        task = task.replace('<|TLANG|>', target_lang)
-        task = task.replace('<|PNC|>', pnc)
-    else:
-        task = 'Above is not speech.'
+    source_lang = get_lang(source_lang)
+    target_lang = get_lang(target_lang)
+    pnc = get_pnc(pnc)
+    task = get_task_template(taskname, is_canary_tokens_augment)
+    task = task.replace('<|SLANG|>', source_lang)
+    task = task.replace('<|TLANG|>', target_lang)
+    task = task.replace('<|PNC|>', pnc)
     return task
 
 
@@ -368,19 +380,20 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         if self.canary_processor != None:
             is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
-            _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
+            # _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
             for id, cut in enumerate(cuts):
-                canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
+                # canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
+
                 if audio_ratio[id] == 0.0:
                     assert hasattr(cut, "question")
                 elif self.prepend_to_exist_question and hasattr(cut, "question"):
                     cut.question = self.prepend_to_exist_question + cut.question
                 elif self.convert_canary_prompt_to_text:
-                    cut.question = convert_canary_prompt_to_text(canary_text, is_canary_tokens_augment)
+                    cut.question = convert_canary_prompt_to_text(cut, is_canary_tokens_augment)
                 elif hasattr(cut, "question"):
                     pass
                 else:
-                    cut.question = self.question + ' ' + canary_text
+                    raise ValueError(f"no question in {cut}")
         metadata = []
         for id, cut in enumerate(cuts):
             self._inject_random_context_into_question(
