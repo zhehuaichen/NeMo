@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 import torch.utils.data
+from lhotse.cut import MixedCut, MonoCut
 from lhotse.dataset.collation import collate_vectors as collate_vectors_lhotse
 from nemo.utils import logging
 
@@ -234,6 +235,9 @@ class TextProcessing:
 
 
 def convert_canary_prompt_to_text(cut, is_canary_tokens_augment):
+    if isinstance(cut, MixedCut):
+        cut = cut._first_non_padding_cut
+    assert isinstance(cut, MonoCut), "Expected MonoCut."
     taskname = cut.custom['taskname']
     pnc = cut.custom['pnc']
     source_lang = cut.custom['source_lang']
@@ -382,6 +386,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
             # _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
             for id, cut in enumerate(cuts):
+                breakpoint()
                 # canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
 
                 if audio_ratio[id] == 0.0:
