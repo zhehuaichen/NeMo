@@ -386,7 +386,6 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             is_canary_tokens_augment = torch.rand(1) < self.canary_tokens_augment_ratio
             # _, _, _, _, canary_tokens, canary_token_lens = self.canary_processor.__getitem__(cuts)
             for id, cut in enumerate(cuts):
-                breakpoint()
                 # canary_text = self.canary_processor.tokenizer._tokenizer.ids_to_text(canary_tokens[id].tolist())
 
                 if audio_ratio[id] == 0.0:
