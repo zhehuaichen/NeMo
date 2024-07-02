@@ -264,6 +264,8 @@ def convert_canary_prompt_to_text(cut, is_canary_tokens_augment):
             lang = 'Ukrainian'
         elif text == "zh":
             lang = 'Chinese'
+        elif text == "is":
+            lang = 'Icelandic'
         else:
             assert False, 'Unknown language {}'.format(text)
         return lang
