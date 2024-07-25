@@ -221,6 +221,8 @@ def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, str
                 lagging.append(cur_src_len)
             if cur_t == tokenizer.eos_id:
                 break
+        if len(lagging) == 0:
+            lagging.append(0)
         metadata[i]['LAAL'] = compute_laal(lagging, audio_signal_length, target_length_word[i]).tolist()
         metadata[i]['AL'] = compute_al(lagging, audio_signal_length, target_length_word[i]).tolist()
     return metadata

@@ -1242,8 +1242,11 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
                 assert torch.equal(context_length, torch.ones_like(context_length) * context_length[0])
                 cur_src_len += context_length[0]
             if 'recompute_encoder' in sampling_kwargs:
-                cur_enc_mask = enc_mask[:, :cur_src_len]
-                cur_encoder_input = encoder_input[:, :cur_src_len]
+                encoder_input_len = cur_src_len
+                if 'recompute_encoder_right_context' in sampling_kwargs:
+                    encoder_input_len += sampling_kwargs['recompute_encoder_right_context']
+                cur_enc_mask = enc_mask[:, :encoder_input_len]
+                cur_encoder_input = encoder_input[:, :encoder_input_len]
                 enc_output = self.encode(
                     tokens_enc=tokens_enc, enc_mask=cur_enc_mask, encoder_input=cur_encoder_input, reconfigure_microbatch=False
                 )
