@@ -226,7 +226,6 @@ model:
     end_string: "[EOG]"
     train_ds:
       # Example of how to specify paths to multiple datasets
-      manifest_filepath: ??? # Path to a list of JSONL files corresponding to the source data.
       # manifest_filepath:
       #   - /path/to/squad.jsonl
       #   - /path/to/mnli.jsonl
