@@ -444,7 +444,7 @@ def collate_text_data(
         adjust_input_ids(
             text_processor._process_example(
                 context=cut.question if hasattr(cut, "question") else default_question,
-                output=cut.supervisions[0].text,
+                output=str(cut.supervisions[0].text),
                 lang='en' if cut.supervisions[0].language is None else cut.supervisions[0].language,
             )
         )

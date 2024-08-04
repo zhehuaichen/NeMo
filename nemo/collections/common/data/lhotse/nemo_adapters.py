@@ -167,7 +167,7 @@ class LazyNeMoTarredIterator:
     Example of CutSet with inter-shard shuffling enabled::
 
         >>> cuts = lhotse.CutSet(LazyNeMoTarredIterator(
-        ...     manifest_path="nemo_manifests/train.json",
+        ...     manifest_path=["nemo_manifests/sharded_manifests/manifest_0.json", ...],
         ...     tar_paths=["nemo_manifests/audio_0.tar", ...],
         ...     shuffle_shards=True,
         ... ))
@@ -175,7 +175,7 @@ class LazyNeMoTarredIterator:
 
     def __init__(
         self,
-        manifest_path: str | Path,
+        manifest_path: str | Path | list[str],
         tar_paths: str | list,
         shuffle_shards: bool = False,
         shard_seed: int | Literal["trng", "randomized"] = "trng",
@@ -255,19 +255,30 @@ class LazyNeMoTarredIterator:
     def __iter__(self) -> Generator[Cut, None, None]:
         shard_ids = self.shard_ids
 
+        seed = resolve_seed(self.shard_seed)
         if self.shuffle_shards:
-            seed = resolve_seed(self.shard_seed)
             random.Random(seed).shuffle(shard_ids)
 
+
+        # Handle NeMo tarred manifests with offsets.
+        # They have multiple JSONL entries where audio paths end with '-sub1', '-sub2', etc. for each offset.
+        offset_pattern = re.compile(r'.+-sub(\d+)')
+
         for sid in shard_ids:
-            shard_manifest = self.shard_id_to_manifest[sid]
+            manifest_path = self.paths[sid] if len(self.paths) > 1 else self.paths[0]
+
+            def basename(d: dict) -> str:
+                return (
+                    k[: -len(m.group(1))] if (m := offset_pattern.match(k := d["audio_filepath"])) is not None else k
+                )
+
+            shard_manifest: dict[str, list[dict]] = groupby(basename, self.shard_id_to_manifest[sid])
             tar_path = self.shard_id_to_tar_path[sid]
             with tarfile.open(fileobj=open_best(tar_path, mode="rb"), mode="r|*") as tar:
-                for data, tar_info in zip(shard_manifest, tar):
-                    manifest_path = self.paths[sid] if len(self.paths) > 1 else self.paths[0]
-                    assert data["audio_filepath"] == tar_info.name, (
+                for tar_info in tar:
+                    assert tar_info.name in shard_manifest, (
                         f"Mismatched entry between JSON manifest ('{manifest_path}') and tar file ('{tar_path}'). "
-                        f"Conflicting audio file names are JSON='{data['audio_filepath']}' and TAR='{tar_info.name}'"
+                        f"Cannot locate JSON entry for tar file '{tar_info.name}'"
                     )
                     raw_audio = tar.extractfile(tar_info).read()
                     # Note: Lhotse has a Recording.from_bytes() utility that we won't use here because
@@ -282,19 +293,24 @@ class LazyNeMoTarredIterator:
                         num_samples=meta.frames,
                         duration=meta.duration,
                     )
-                    cut = recording.to_cut()
-                    cut.supervisions.append(
-                        SupervisionSegment(
-                            id=cut.id,
-                            recording_id=cut.recording_id,
-                            start=0,
-                            duration=cut.duration,
-                            text=data.get(self.text_field),
-                            language=data.get(self.lang_field),
+                    for data in sorted(shard_manifest[tar_info.name], key=lambda d: d["audio_filepath"]):
+                        cut = recording.to_cut().truncate(
+                            offset=data.get("offset", 0.0),
+                            duration=data.get("duration"),
+                            preserve_id=True,
                         )
-                    )
-                    cut.custom = _to_custom_attr_dict(data)
-                    yield cut
+                        cut.supervisions.append(
+                            SupervisionSegment(
+                                id=cut.id,
+                                recording_id=cut.recording_id,
+                                start=0,
+                                duration=cut.duration,
+                                text=data.get(self.text_field),
+                                language=data.get(self.lang_field),
+                            )
+                        )
+                        cut.custom = _to_custom_attr_dict(data)
+                        yield cut
 
     def __len__(self) -> int:
         return len(self.source)
