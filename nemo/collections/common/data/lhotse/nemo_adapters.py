@@ -293,11 +293,19 @@ class LazyNeMoTarredIterator:
                         num_samples=meta.frames,
                         duration=meta.duration,
                     )
+                    cuts_for_recording = []
                     for data in sorted(shard_manifest[tar_info.name], key=lambda d: d["audio_filepath"]):
-                        cut = recording.to_cut().truncate(
-                            offset=data.get("offset", 0.0),
-                            duration=data.get("duration"),
-                            preserve_id=True,
+                        if data.get("duration") == 0:
+                            continue
+                        # Cut the recording into corresponding segment and discard audio data outside the segment.
+                        cut = (
+                            recording.to_cut()
+                            .truncate(
+                                offset=data.get("offset", 0.0),
+                                duration=data.get("duration"),
+                                preserve_id=True,
+                            )
+                            .move_to_memory(audio_format="wav")
                         )
                         cut.supervisions.append(
                             SupervisionSegment(
@@ -310,7 +318,10 @@ class LazyNeMoTarredIterator:
                             )
                         )
                         cut.custom = _to_custom_attr_dict(data)
-                        yield cut
+                        cuts_for_recording.append(cut)
+                    del recording  # free the memory - helps with very large audio files
+                    del raw_audio
+                    yield from cuts_for_recording
 
     def __len__(self) -> int:
         return len(self.source)
