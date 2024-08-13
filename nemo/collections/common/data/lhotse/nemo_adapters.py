@@ -23,6 +23,7 @@ from typing import Generator, Iterable, List, Literal
 import soundfile
 from cytoolz import groupby
 from lhotse import AudioSource, Recording, SupervisionSegment
+from lhotse.audio.backend import LibsndfileBackend
 from lhotse.cut import Cut
 from lhotse.dataset.dataloading import resolve_seed
 from lhotse.lazy import LazyIteratorChain, LazyJsonlIterator
