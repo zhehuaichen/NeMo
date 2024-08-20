@@ -19,9 +19,9 @@ import os
 from functools import partial
 from typing import Any, Optional, Union
 
+import numpy as np
 import sacrebleu
 import torch
-import numpy as np
 from omegaconf import ListConfig
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import OmegaConf, open_dict
@@ -34,11 +34,11 @@ from nemo.collections.multimodal.speech_llm.data.build_dataset import (
     build_speechllm_dataloader,
     build_speechllm_dataset,
 )
+from nemo.collections.multimodal.speech_llm.modules.multi_proj_modules import SumMultiEmbedding
 from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     AudioPerceptionModule,
     MultiAudioPerceptionModule,
 )
-from  nemo.collections.multimodal.speech_llm.modules.multi_proj_modules import MegatronNMTMultiProjModel, MegatronTokenLevelEncoderDecoderMultiProjModule, SumMultiEmbedding
 from nemo.collections.nlp.models.language_modeling.megatron_t5_adapter_model import MegatronT5LoraModel
 from nemo.collections.nlp.models.language_modeling.megatron_t5_sft_model import MegatronT5SFTModel
 from nemo.collections.nlp.models.nlp_model import NLPModel
@@ -526,6 +526,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             gpt_cfg.precision = cfg.trainer.precision
             gpt_cfg.answer_only_loss = cfg.model.answer_only_loss
             gpt_cfg.language_model_path = cfg.model.language_model_path
+            gpt_cfg.salm_model_path = cfg.model.get("salm_model_path", None)
             gpt_cfg.resume_from_checkpoint = cfg.model.resume_from_checkpoint
             gpt_cfg.save_nemo_on_validation_end = cfg.model.save_nemo_on_validation_end
             gpt_cfg.gradient_as_bucket_view = cfg.model.gradient_as_bucket_view
@@ -623,7 +624,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         )
         # load am
         model.perception.tokenizer = audio_model.tokenizer
-        if cfg.model.get('load_audio_encoder', True):
+        if cfg.model.get('load_audio_encoder', True) and cfg.model.get('salm_model_path') is None:
             model.perception.encoder.load_state_dict(
                 audio_model.encoder.state_dict(), strict='adapter' not in cfg.model.perception
             )
@@ -1392,7 +1393,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             strict=False,
         )
         logging.info(f"self.frozen_model.cfg: {self.frozen_model.cfg}")
-    
+
     def init_model(self, cfg: DictConfig, trainer: Trainer):
         self.cfg = cfg
 
@@ -1407,20 +1408,6 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             )  # Encoder and decoder need to have the same hidden size and we check for this in the frozen enc-dec model.
         else:
             self.hidden_size = self.frozen_model.cfg.hidden_size
-
-        # Extend word embedding table if self.padded_vocab_size is larger than the size of the pre-trained word embedding
-        pretrained_emb = self.frozen_model.enc_dec_model.decoder_embedding.word_embeddings
-        self.frozen_model.enc_dec_model.decoder_embedding = SumMultiEmbedding(
-            config=self.frozen_model.enc_dec_model.config,
-            hidden_size=self.hidden_size,
-            vocab_size=self.padded_vocab_size,
-            max_sequence_length=self.frozen_model.cfg.max_position_embeddings,
-            init_method=init_method_normal(0.2),
-            num_tokentypes=0,
-            embedding_dropout_prob=self.frozen_model.cfg.embedding_dropout,
-            position_embedding_type=self.frozen_model.cfg.encoder.get('position_embedding_type', 'learned_absolute'),
-        )
-        self.frozen_model.enc_dec_model.decoder_embedding.word_embeddings.weight.data[:pretrained_emb.weight.shape[0]] = pretrained_emb.weight.data
 
         # Handle this when moving GPT prompt learning to the base class.
         self.word_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.word_embeddings
@@ -1440,7 +1427,34 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         self.enable_autocast = (
             True if (not self.megatron_amp_O2) and (self.autocast_dtype in [torch.float16, torch.bfloat16]) else False
         )
-    
+
+    def __init__(self, cfg: DictConfig, trainer: Trainer):
+        self.cfg = cfg
+        super().__init__(cfg, trainer)
+        if cfg.get('salm_model_path') is not None:
+            torch_state_dict = torch.load(cfg.get('salm_model_path'))['state_dict']
+            self.setup_complete = False
+            # breakpoint()
+            self.load_state_dict(torch_state_dict, strict=False)
+            logging.info(f"loading from {cfg.get('salm_model_path')}: {torch_state_dict.keys()}")
+
+        # Extend word embedding table if self.padded_vocab_size is larger than the size of the pre-trained word embedding
+        pretrained_emb = self.frozen_model.enc_dec_model.decoder_embedding.word_embeddings
+        self.frozen_model.enc_dec_model.decoder_embedding = SumMultiEmbedding(
+            config=self.frozen_model.enc_dec_model.config,
+            hidden_size=self.hidden_size,
+            vocab_size=self.padded_vocab_size,
+            max_sequence_length=self.frozen_model.cfg.max_position_embeddings,
+            init_method=init_method_normal(0.2),
+            num_tokentypes=0,
+            embedding_dropout_prob=self.frozen_model.cfg.embedding_dropout,
+            position_embedding_type=self.frozen_model.cfg.encoder.get('position_embedding_type', 'learned_absolute'),
+        )
+        self.frozen_model.enc_dec_model.decoder_embedding.word_embeddings.weight.data[
+            : pretrained_emb.weight.shape[0]
+        ] = pretrained_emb.weight.data
+        self.word_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.word_embeddings
+
     @classmethod
     def _modify_config(cls, gpt_cfg, cfg, audio_cfg, add_cfg_to_tree=False):
         """
@@ -1475,8 +1489,14 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         return gpt_cfg
 
     def prepare_llm_input(self, audio_batch):
+
         input_signal = audio_batch['audio_signal']
         input_signal_length = audio_batch['audio_signal_length']
+
+        input_ids, input_length = (
+            audio_batch['instructions'],
+            audio_batch['instruction_lengths'],
+        )
 
         # [b, t, c]
         encoded, encoded_len = self.perception(
@@ -1485,7 +1505,11 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             processed_signal=None,
             processed_signal_length=None,
         )
-        encoder_input, attention_mask, encoder_length = encoded, None, encoded_len
+        # encoder_input, attention_mask, encoder_length = encoded, None, encoded_len
+        encoder_input, attention_mask, encoder_length, _, encoder_max_length = self.inject_perception_input(
+            encoded, encoded_len, input_ids, input_length
+        )
+
         # generate encoder_mask from encoder_length
         enc_mask = torch.arange(encoder_input.shape[1], device=encoder_input.device)[None, :] < encoder_length[:, None]
         return encoder_input, attention_mask, enc_mask
@@ -1515,11 +1539,10 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         # dec_input and label = text prompt and text output label
         dec_input = audio_batch['tokens']
         labels = audio_batch['labels']
-        instructions = audio_batch['instructions']
-        encoder_input = torch.cat([self.frozen_model.enc_dec_model.encoder_embedding(instructions, None, token_type_ids=None).transpose(0, 1), encoder_input], axis=1)
-        enc_mask = torch.cat([instructions != self.tokenizer.pad_id, enc_mask], axis=1)
 
-        dec_mask = (dec_input[:, :, 0] != self.tokenizer.eos_id) * (dec_input[:, :, 0] != self.tokenizer.pad_id).long().contiguous()
+        dec_mask = (dec_input[:, :, 0] != self.tokenizer.eos_id) * (
+            dec_input[:, :, 0] != self.tokenizer.pad_id
+        ).long().contiguous()
         output = self.frozen_model.enc_dec_model(
             enc_input_ids=None,
             enc_attn_mask=enc_mask,
@@ -1531,10 +1554,9 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             enc_input=encoder_input,
             **kwargs,
         )
-        
+
         loss_mask = audio_batch['loss_mask']
         return output, loss_mask
-    
 
     def fwd_bwd_step(self, dataloader_iter, batch_idx, forward_only, return_attention_probs=False):
         batch = next(dataloader_iter)
@@ -1586,9 +1608,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             else:
                 # Get the total loss since micro batches sizes are not uniform
                 loss_sum_tensors_list = [
-                    item['loss_sum_and_ub_size']
-                    for item in output
-                    if item['loss_sum_and_ub_size'][1] > 0
+                    item['loss_sum_and_ub_size'] for item in output if item['loss_sum_and_ub_size'][1] > 0
                 ]
                 loss_sum = (
                     torch.vstack(loss_sum_tensors_list).sum(axis=0)
@@ -1616,8 +1636,8 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             batch = next(dataloader_iter)
             batch = {key: val.cuda(non_blocking=True) for key, val in batch.items()}
             output, loss_mask = self.forward(
-                batch, 
-                checkpoint_activations_all_layers=checkpoint_activations_all_layers, 
+                batch,
+                checkpoint_activations_all_layers=checkpoint_activations_all_layers,
                 return_all_selfattention_probs=True,
                 return_all_crossattention_probs=True,
             )
@@ -1629,7 +1649,8 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
                     text_loss_weight = self.cfg.get('text_loss_weight', 1.0)
                     audio_ratio = batch['audio_ratio']
                     scaled_loss_mask = loss_mask * torch.unsqueeze(
-                        (1 * audio_ratio + text_loss_weight * (1 - audio_ratio)), 1, 
+                        (1 * audio_ratio + text_loss_weight * (1 - audio_ratio)),
+                        1,
                     ).unsqueeze(2)
                     loss_for_ub = self.loss_func(scaled_loss_mask, output_tensor)
                 else:
@@ -1652,7 +1673,10 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
                     torch.distributed.all_reduce(
                         loss_sum_and_ub_size_all_gpu, group=parallel_state.get_data_parallel_group()
                     )
-                    return loss_for_ub, {'loss_sum_and_ub_size': loss_sum_and_ub_size_all_gpu, 'attention_probs': attention_probs}
+                    return loss_for_ub, {
+                        'loss_sum_and_ub_size': loss_sum_and_ub_size_all_gpu,
+                        'attention_probs': attention_probs,
+                    }
                 else:
                     reduced_loss = average_losses_across_data_parallel_group([loss_for_ub])
                     return loss_for_ub, {'avg': reduced_loss, 'attention_probs': attention_probs}
@@ -1660,7 +1684,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             return output, loss_func
 
         return fwd_output_and_loss_func
-    
+
     def _validation_step_internal(
         self, dataloader_iter, batch_idx, dataloader_idx=0, inference=False, result_mode='validation'
     ):
@@ -1695,7 +1719,9 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         # Meta data from dataset
         metadata = batch.get('metadata', [{}] * len(batch['tokens']))
         speaker_contexts = batch.get('speaker_contexts', [{}] * len(batch['tokens']))
-        loss, attention_probs = self._validation_step_internal(itertools.chain([batch]), batch_idx, dataloader_idx, result_mode=mode)
+        loss, attention_probs = self._validation_step_internal(
+            itertools.chain([batch]), batch_idx, dataloader_idx, result_mode=mode
+        )
         if self.cfg.attention_map_mode == 'validation':
             self_attention_probs, cross_attention_probs = attention_probs
 
@@ -1711,6 +1737,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         # pdb.set_trace()
 
         inputs_text = output['input_text']
+        inputs_text = MegatronT5SFTModel.ids_to_text(inputs_text, self.tokenizer)
         answers = output['answers']
         preds = output['preds']
         if self.cfg.attention_map_mode == 'inference':
@@ -1766,7 +1793,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
         answers = batch['target_texts']
 
         return {
-            'input_text': batch['source_texts'],
+            'input_text': batch['instructions'],
             'preds': predicted_token_ids,
             'answers': batch['target_texts'],
             'attention_probs': attention_probs,
@@ -1785,7 +1812,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
 
         if isinstance(outputs[0], dict):
             outputs = [outputs]
-        
+
         averaged_loss = []
         # Log metrics for each provided validation/test dataset.
         for dataloader_idx, output in enumerate(outputs):
@@ -1821,7 +1848,15 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             torch.distributed.all_gather_object(
                 gathered_outputs,
                 [
-                    {'preds': x['preds'], 'answers': x['answers'], 'inputs': x['inputs'], 'speaker_contexts': x['speaker_contexts'], 'metadata': x['metadata'], 'self_attention_probs': x['self_attention_probs'], 'cross_attention_probs': x['cross_attention_probs']}
+                    {
+                        'preds': x['preds'],
+                        'answers': x['answers'],
+                        'inputs': x['inputs'],
+                        'speaker_contexts': x['speaker_contexts'],
+                        'metadata': x['metadata'],
+                        'self_attention_probs': x['self_attention_probs'],
+                        'cross_attention_probs': x['cross_attention_probs'],
+                    }
                     for x in output
                 ],
                 group=parallel_state.get_data_parallel_group(),
@@ -1842,15 +1877,25 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
             for rank in range(0, parallel_state.get_data_parallel_world_size()):
                 for batch in gathered_outputs[rank]:
                     for pred, answer, input, speaker_context, self_attn, cross_attn, metadata in zip(
-                        batch['preds'], batch['answers'], batch['inputs'], batch['speaker_contexts'], batch['self_attention_probs'], batch['cross_attention_probs'], batch['metadata']
+                        batch['preds'],
+                        batch['answers'],
+                        batch['inputs'],
+                        batch['speaker_contexts'],
+                        batch['self_attention_probs'],
+                        batch['cross_attention_probs'],
+                        batch['metadata'],
                     ):
                         key = input
                         total_size += 1
                         dedup = data_cfg.get('deduplicate', True)
                         if (not dedup) or key not in inp_label_set:
                             inp_label_set.add(key)
-                            deduplicated_outputs['preds'].append(MegatronT5SFTModel.ids_to_text(pred[:, 0].unsqueeze(0), self.tokenizer))
-                            deduplicated_outputs['answers'].append(MegatronT5SFTModel.ids_to_text(answer[:, 0].unsqueeze(0), self.tokenizer))
+                            deduplicated_outputs['preds'].append(
+                                MegatronT5SFTModel.ids_to_text(pred[:, 0].unsqueeze(0), self.tokenizer)
+                            )
+                            deduplicated_outputs['answers'].append(
+                                MegatronT5SFTModel.ids_to_text(answer[:, 0].unsqueeze(0), self.tokenizer)
+                            )
                             deduplicated_outputs['inputs'].append(input)
                             # deduplicated_outputs['speaker_contexts'].append(speaker_context)
                             deduplicated_outputs['self_attn'].append(self_attn)
@@ -1922,10 +1967,25 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
 
         with open(inputs_path, "w") as f_json:
             assert (
-                len(outputs['inputs']) == len(outputs['preds']) == len(outputs['answers']) == len(outputs['self_attn']) == len(outputs['cross_attn']) == len(outputs['metadata'])
+                len(outputs['inputs'])
+                == len(outputs['preds'])
+                == len(outputs['answers'])
+                == len(outputs['self_attn'])
+                == len(outputs['cross_attn'])
+                == len(outputs['metadata'])
             )
-            for i, (input_, pred, answer, self_attn, cross_attn, md) in enumerate(zip(outputs['inputs'], outputs['preds'], outputs['answers'], outputs['self_attn'], outputs['cross_attn'], outputs['metadata'])):
-                json_string = {'preds': pred, 'answers': answer}
+            for i, (input_, pred, answer, self_attn, cross_attn, md) in enumerate(
+                zip(
+                    outputs['inputs'],
+                    outputs['preds'],
+                    outputs['answers'],
+                    outputs['self_attn'],
+                    outputs['cross_attn'],
+                    outputs['metadata'],
+                )
+            ):
+                json_string = {'input': input_, 'preds': pred, 'answers': answer}
+                logging.info(f"{json_string}")
                 for k, v in md.items():
                     if k not in json_string:
                         json_string[k] = v
@@ -1946,7 +2006,7 @@ class MultiProjModularizedAudioT5Model(ModularizedAudioT5Model):
 
     def convert_speech_token_id(self, tokens, vocab_sizes):
         for i, v in enumerate(vocab_sizes[:-1]):
-            tokens[:, i+1:] -= v
+            tokens[:, i + 1 :] -= v
         return tokens
 
     def _build_dataset(self, data_cfg, is_train=True):

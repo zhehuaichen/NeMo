@@ -1,10 +1,11 @@
-import torch.utils.data
-import random
 import logging
+import random
+
+import torch.utils.data
 from lhotse import CutSet
 from lhotse.dataset import AudioSamples
-from lhotse.dataset.collation import collate_vectors as collate_vectors_lhotse
 from lhotse.dataset.collation import _read_features
+from lhotse.dataset.collation import collate_vectors as collate_vectors_lhotse
 
 from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import (
     TextProcessing,
@@ -110,25 +111,25 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         metadata = []
         instructions, instruction_lengths = [], []
-        source_texts, source_text_lengths = [], [] # Not used in the current implementation
+        source_texts, source_text_lengths = [], []  # Not used in the current implementation
         target_texts, target_text_lengths = [], []
         for id, cut in enumerate(cuts):
             metadata.append({'audio_filepath': cut.id + '.wav'})
 
-            instruction = self.text_processor._process_example(
-                context=cut.supervisions[0].text, output=""
+            instruction = self.text_processor._process_example(context=cut.supervisions[0].text, output="")
+            instruction, instruction_length = torch.as_tensor(instruction["context_ids"]), torch.as_tensor(
+                instruction["context_length"]
             )
-            instruction, instruction_length = torch.as_tensor(instruction["context_ids"]), torch.as_tensor(instruction["context_length"])
 
-            source_text = self.text_processor._process_example(
-                context=cut.supervisions[1].text, output=""
+            source_text = self.text_processor._process_example(context=cut.supervisions[1].text, output="")
+            source_text, source_text_length = torch.as_tensor(source_text["context_ids"]), torch.as_tensor(
+                source_text["context_length"]
             )
-            source_text, source_text_length = torch.as_tensor(source_text["context_ids"]), torch.as_tensor(source_text["context_length"])
 
-            target_text = self.text_processor._process_example(
-                context=cut.supervisions[2].text, output=""
+            target_text = self.text_processor._process_example(context=cut.supervisions[2].text, output="")
+            target_text, target_text_length = torch.as_tensor(target_text["context_ids"]), torch.as_tensor(
+                target_text["context_length"]
             )
-            target_text, target_text_length = torch.as_tensor(target_text["context_ids"]), torch.as_tensor(target_text["context_length"])
 
             instructions.append(instruction)
             instruction_lengths.append(instruction_length)
@@ -139,16 +140,17 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         # Now handle TTS if any
         text_pad_id = self.text_processor.pad_id
-        text_unk_id = self.text_processor.unk_id # filled in the text axis when the model output speech codecs
+        text_unk_id = self.text_processor.unk_id  # filled in the text axis when the model output speech codecs
 
         def get_3d_fully_padded_tensor(batch_size, length):
             return torch.cat(
                 [
                     torch.full((batch_size, length, 1), text_pad_id),
                     torch.full((batch_size, length, self.n_speech_codebooks), self.speech_pad_id),
-                ], axis=2
+                ],
+                axis=2,
             )
-        
+
         def collate_and_pad(inputs):
             token_lengths = [len(seq) for seq in inputs]
             max_length = self.tokens_to_generate + max(token_lengths)
@@ -163,33 +165,43 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             else:
                 tokens = get_3d_fully_padded_tensor(len(inputs), max_length)
                 for i in range(len(tokens)):
-                    tokens[i, :token_lengths[i], :] = inputs[i]
+                    tokens[i, : token_lengths[i], :] = inputs[i]
             return tokens, torch.LongTensor(token_lengths)
-            
+
         features_lens = torch.tensor([cut.target_codes.shape[0] for cut in cuts], dtype=torch.int)
-        target_codec = get_3d_fully_padded_tensor(len(cuts), max(features_lens).item()+1)
-        eos_tensor = torch.full((1, self.n_speech_codebooks+1), self.speech_pad_id).to(torch.int)
-        eos_tensor[:,0] = self.text_processor.eos_id
+        target_codec = get_3d_fully_padded_tensor(len(cuts), max(features_lens).item() + 1)
+        eos_tensor = torch.full((1, self.n_speech_codebooks + 1), self.speech_pad_id).to(torch.int)
+        eos_tensor[:, 0] = self.text_processor.eos_id
         # Loop through cuts and build target_codec, label, and context tensors
         speaker_context_list = []
         for i, cut in enumerate(cuts):
             feat_i = cut.target_codes.load()
-            target_codec[i,:feat_i.shape[0],0] = text_unk_id
-            target_codec[i,:feat_i.shape[0],1:] = torch.tensor(feat_i)[:, :self.n_speech_codebooks]
+            target_codec[i, : feat_i.shape[0], 0] = text_unk_id
+            target_codec[i, : feat_i.shape[0], 1:] = torch.tensor(feat_i)[:, : self.n_speech_codebooks]
             target_codec[i, feat_i.shape[0], :] = eos_tensor
             speaker_context = cut.load_context()
             # take random 3s splice from context
             # TODO: fix hardcode
-            rng = random.Random()  # Custom random generator (since random uses fixed seeds). Else context remains fixed
+            rng = (
+                random.Random()
+            )  # Custom random generator (since random uses fixed seeds). Else context remains fixed
             reference_codec_len = 3 * 86
             reference_codec_len = min(reference_codec_len, speaker_context.shape[0])
             si = rng.randint(0, speaker_context.shape[0] - reference_codec_len)
-            speaker_context = speaker_context[si : si + reference_codec_len, :self.n_speech_codebooks]
+            speaker_context = speaker_context[si : si + reference_codec_len, : self.n_speech_codebooks]
             speaker_context_list.append(torch.tensor(speaker_context))
 
         target_codec = target_codec.to(torch.int)
-        speaker_context = torch.stack(speaker_context_list).to(torch.int) # Not used in the current implementation
-        speaker_context = torch.cat([torch.full((speaker_context.shape[0], speaker_context.shape[1], 1), text_unk_id, dtype=speaker_context.dtype), speaker_context], axis=2)
+        speaker_context = torch.stack(speaker_context_list).to(torch.int)  # Not used in the current implementation
+        speaker_context = torch.cat(
+            [
+                torch.full(
+                    (speaker_context.shape[0], speaker_context.shape[1], 1), text_unk_id, dtype=speaker_context.dtype
+                ),
+                speaker_context,
+            ],
+            axis=2,
+        )
 
         instructions, instruction_lengths = collate_and_pad(instructions)
         source_texts, source_text_lengths = collate_and_pad(source_texts)
@@ -201,28 +213,30 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         # bos_tensor = torch.full((len(cuts), 1, self.n_speech_codebooks+1), self.speech_pad_id).to(torch.int)
         # bos_tensor[:,:,0] = self.text_processor.bos_id
-        
+
         # answers = torch.concat([speaker_context, bos_tensor, target_codec], 1)
 
         if getattr(cut, "s2st", False):
             # Add 1 for eos token
-            token_list = [torch.concat([tt[:ttl], tc[:tcl+1]], 0) for tt, ttl, tc, tcl in zip(target_texts, target_text_lengths, target_codec, features_lens)]
+            token_list = [
+                torch.concat([tt[:ttl], tc[: tcl + 1]], 0)
+                for tt, ttl, tc, tcl in zip(target_texts, target_text_lengths, target_codec, features_lens)
+            ]
             tokens, _ = collate_and_pad(token_list)
-            loss_mask = torch.zeros(tokens.shape[0], tokens.shape[1]-1, tokens.shape[2])
+            loss_mask = torch.zeros(tokens.shape[0], tokens.shape[1] - 1, tokens.shape[2])
             for i in range(len(tokens)):
-                loss_mask[i, :target_text_lengths[i]-1, 0] = 1
-                loss_mask[i, target_text_lengths[i]-1:target_text_lengths[i]+features_lens[i], 1:] = 1
+                loss_mask[i, : target_text_lengths[i] - 1, 0] = 1
+                loss_mask[i, target_text_lengths[i] - 1 : target_text_lengths[i] + features_lens[i], 1:] = 1
         elif getattr(cut, "s2tt", False):
             token_list = [tt[:ttl] for tt, ttl in zip(target_texts, target_text_lengths)]
             tokens, _ = collate_and_pad(token_list)
-            loss_mask = torch.zeros(tokens.shape[0], tokens.shape[1]-1, tokens.shape[2])
+            loss_mask = torch.zeros(tokens.shape[0], tokens.shape[1] - 1, tokens.shape[2])
             for i in range(len(tokens)):
-                loss_mask[i, :target_text_lengths[i]-1, 0] = 1
+                loss_mask[i, : target_text_lengths[i] - 1, 0] = 1
 
-        
         for i in range(self.n_speech_codebooks):
-            tokens[:,:,i+1] += sum(self.vocab_sizes[:i+1])
-        
+            tokens[:, :, i + 1] += sum(self.vocab_sizes[: i + 1])
+
         # Merge batch
         return_batch = {
             "sample_ids": list(cuts.ids),
@@ -232,6 +246,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "metadata": metadata,
             # For forward
             "instructions": instructions,
+            "instruction_lengths": instruction_lengths,
             "tokens": tokens[:, :-1, :],
             "labels": tokens[:, 1:, :],
             "loss_mask": loss_mask,
@@ -297,7 +312,7 @@ def collate_text_data(
         "context_lengths": torch.LongTensor([len(seq) for seq in fields["context_ids"]]),
         "answers": collate_vectors(fields["answer_ids"], max_length=max_length, padding_value=pad_id),
         "max_length": torch.LongTensor([max_length] * batch_size),
-        "context_ids": fields["context_ids"]
+        "context_ids": fields["context_ids"],
     }
 
 

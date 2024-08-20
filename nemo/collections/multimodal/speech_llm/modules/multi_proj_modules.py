@@ -13,29 +13,28 @@
 # limitations under the License.
 
 from typing import Dict
+
 import torch
 from omegaconf.dictconfig import DictConfig
-from pytorch_lightning.trainer.trainer import Trainer
 from pytorch_lightning.loops.fetchers import _DataFetcherWrapper
+from pytorch_lightning.trainer.trainer import Trainer
 
+from nemo.collections.nlp.models.machine_translation.megatron_nmt_model import MegatronNMTModel
 from nemo.collections.nlp.modules.common.megatron.adapters.parallel_adapters import (
     AdapterName,
     PromptEncoderAdapterConfig,
 )
-from nemo.collections.nlp.modules.common.megatron.utils import (
-    build_position_ids,
-    init_method_normal,
-)
-from nemo.collections.nlp.modules.common.text_generation_utils import (
-    get_sampling_token_fn,
-)
 from nemo.collections.nlp.modules.common.megatron.language_model import Embedding
+from nemo.collections.nlp.modules.common.megatron.megatron_encoder_decoder import (
+    MegatronTransformerEncoderDecoderModule,
+)
+from nemo.collections.nlp.modules.common.megatron.token_level_encoder_decoder import (
+    MegatronTokenLevelEncoderDecoderModule,
+)
+from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids, init_method_normal
 from nemo.collections.nlp.modules.common.megatron.vocab_parallel_cross_entropy import vocab_parallel_cross_entropy
+from nemo.collections.nlp.modules.common.text_generation_utils import get_sampling_token_fn
 from nemo.utils import AppState, logging
-
-from nemo.collections.nlp.models.machine_translation.megatron_nmt_model import MegatronNMTModel
-from nemo.collections.nlp.modules.common.megatron.token_level_encoder_decoder import MegatronTokenLevelEncoderDecoderModule
-from nemo.collections.nlp.modules.common.megatron.megatron_encoder_decoder import MegatronTransformerEncoderDecoderModule
 
 try:
     from apex.transformer.pipeline_parallel.utils import (
@@ -51,7 +50,7 @@ except (ImportError, ModuleNotFoundError):
     HAVE_APEX = False
 
 try:
-    from megatron.core import parallel_state, tensor_parallel, ModelParallelConfig
+    from megatron.core import ModelParallelConfig, parallel_state, tensor_parallel
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
     HAVE_MEGATRON_CORE = True
@@ -60,12 +59,11 @@ except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE = False
 
 
-
 class MegatronNMTMultiProjModel(MegatronNMTModel):
     """
     Megatron NMT training
     """
-    
+
     def model_provider_func(self, pre_process, post_process, add_encoder, add_decoder):
         if not hasattr(self.cfg, 'encoder') or not hasattr(self.cfg, 'decoder'):
             logging.warning(
@@ -86,7 +84,7 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
             embedding_dropout = self.cfg.encoder.hidden_dropout
         else:
             embedding_dropout = self.cfg.embedding_dropout
-        
+
         if not hasattr(self.cfg, 'n_proj_heads'):
             self.n_proj_heads = 1
         else:
@@ -118,7 +116,7 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
             add_encoder=add_encoder,
             add_decoder=add_decoder,
             share_token_embeddings=self.cfg.get('share_token_embeddings', True),
-            share_decoder_tokens_head_embeddings=False,
+            share_decoder_tokens_head_embeddings=True,
             tokens_head_bias=self.cfg.get('tokens_head_bias', True),
             hiddens_cfg=self.cfg.get('hiddens', None),
             n_proj_heads=self.n_proj_heads,
@@ -215,7 +213,9 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
         if predicted_tokens_dec is None:
             predicted_tokens_dec = torch.LongTensor([bos_id] * global_batch_per_gpu).unsqueeze(1).to(device)
         # collect log probs that were used in the sampling
-        predicted_log_probs = torch.zeros((global_batch_per_gpu, 0, self.n_proj_heads), dtype=self.autocast_dtype).to(device)
+        predicted_log_probs = torch.zeros((global_batch_per_gpu, 0, self.n_proj_heads), dtype=self.autocast_dtype).to(
+            device
+        )
 
         tensor_shape = [encoder_seq_length, global_batch_per_gpu, self.cfg.encoder.hidden_size]
         assert predicted_tokens_dec.size(0) == global_batch_per_gpu
@@ -239,7 +239,12 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
             batch_for_pipeline = [enc_output, enc_output_attn_mask, predicted_tokens_dec, dec_mask, batch_data]
             arg_names = ['enc_output', 'enc_output_attn_mask', 'dec_input_ids', 'dec_attn_mask', 'batch_data']
 
-            forward_step_func = self._get_forward_output_only_func(arg_names=arg_names, output_name=["logits", "attention_probs"], return_all_selfattention_probs=True, return_all_crossattention_probs=True)
+            forward_step_func = self._get_forward_output_only_func(
+                arg_names=arg_names,
+                output_name=["logits", "attention_probs"],
+                return_all_selfattention_probs=True,
+                return_all_crossattention_probs=True,
+            )
             fwd_bwd_func = get_forward_backward_func()
 
             output_tensor = fwd_bwd_func(
@@ -256,7 +261,7 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
                 decoder_seq_length=encoder_seq_length,
                 micro_batch_size=get_micro_batch_size(),
             )
-            
+
             # get output tensor
             if parallel_state.is_pipeline_last_stage():
                 output_tensor, attention_probs = output_tensor[0]['logits'], output_tensor[0]['attention_probs']
@@ -414,10 +419,12 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
                 if isinstance(output_tensor, dict):
                     # handle loss of hidden transformations ("output" is the default output)
                     output_tensor = output_tensor["output"]
-                
+
                 if isinstance(output_name, list):
                     assert isinstance(output_tensor, tuple)
-                    assert len(output_name) == len(output_tensor), "the number of items in output_tensor and output_name does not match"
+                    assert len(output_name) == len(
+                        output_tensor
+                    ), "the number of items in output_tensor and output_name does not match"
                     output_dict = {name: value for name, value in zip(output_name, output_tensor)}
                 else:
                     output_dict = {output_name: output_tensor}
@@ -427,6 +434,7 @@ class MegatronNMTMultiProjModel(MegatronNMTModel):
             return output, id_func
 
         return fwd_output_only_func
+
 
 class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderDecoderModule):
     """Token-based (input/output is tokens) encoder-decoder model (e.g. T5 Language model.)"""
@@ -450,7 +458,7 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
         add_encoder=True,
         add_decoder=True,
         share_token_embeddings=True,
-        share_decoder_tokens_head_embeddings=False,
+        share_decoder_tokens_head_embeddings=True,
         tokens_head_bias=True,
         hiddens_cfg: DictConfig = None,  # allows for hidden state transformations before the decoder
         n_proj_heads=1,
@@ -489,16 +497,19 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
         share_decoder_tokens_head_embeddings = False
 
         if add_decoder and post_process:
-            self.tokens_heads = torch.nn.ModuleList([
-                tensor_parallel.ColumnParallelLinear(
-                    input_size=decoder_cfg.hidden_size,
-                    output_size=proj_head_dims[i],
-                    config=config,
-                    bias=tokens_head_bias,
-                    gather_output=not self.parallel_output,
-                    init_method=init_method_normal(decoder_cfg.init_method_std),
-                ) for i in range(self.n_proj_heads)
-            ])
+            self.tokens_heads = torch.nn.ModuleList(
+                [
+                    tensor_parallel.ColumnParallelLinear(
+                        input_size=decoder_cfg.hidden_size,
+                        output_size=proj_head_dims[i],
+                        config=config,
+                        bias=tokens_head_bias,
+                        gather_output=not self.parallel_output,
+                        init_method=init_method_normal(decoder_cfg.init_method_std),
+                    )
+                    for i in range(self.n_proj_heads)
+                ]
+            )
 
             self._tokens_head_key = 'tokens_heads'
         self.set_accepted_adapter_types([PromptEncoderAdapterConfig._target_])
@@ -575,7 +586,8 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
 
         if self.add_encoder and self.encoder_relative_position_embedding is not None:
             encoder_self_attention_relative_position_bias = self.encoder_relative_position_embedding(
-                query_seq_length=enc_seq_length, key_seq_length=enc_seq_length,
+                query_seq_length=enc_seq_length,
+                key_seq_length=enc_seq_length,
             )
 
         if output_enc_hidden_only:
@@ -613,12 +625,15 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
                     query_seq_length=dec_input_ids.size(1), key_seq_length=dec_input_ids.size(1)
                 )
                 if not self.decoder_cfg.relative_position_bias_self_attention_only:
-                    decoder_cross_attention_relative_position_bias = self.decoder_cross_attention_relative_position_embedding(
-                        query_seq_length=dec_input_ids.size(1), key_seq_length=enc_seq_length,
+                    decoder_cross_attention_relative_position_bias = (
+                        self.decoder_cross_attention_relative_position_embedding(
+                            query_seq_length=dec_input_ids.size(1),
+                            key_seq_length=enc_seq_length,
+                        )
                     )
                 else:
                     decoder_cross_attention_relative_position_bias = None
-            
+
             output = self.enc_dec_model(
                 enc_input=enc_input,
                 enc_attn_mask=enc_attn_mask,
@@ -646,7 +661,9 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
                     def post_process_attention_scores(attention_scores):
                         if len(attention_scores) == 0:
                             return None
-                        attention_probs = [torch.softmax(attention_score, dim=-1) for attention_score in attention_scores]
+                        attention_probs = [
+                            torch.softmax(attention_score, dim=-1) for attention_score in attention_scores
+                        ]
                         attention_scores_averaged = torch.mean(torch.cat(attention_probs, dim=1), dim=1)
                         # text_start_idx = text_limits[0, 0].item()
                         # assert torch.all(
@@ -670,7 +687,7 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
                         #     attn_logprob=attention_logprobs, in_lens=enc_len, out_lens=dec_len
                         # )
                         return attention_scores_averaged
-                    
+
                     self_attention_scores = post_process_attention_scores(self_attention_scores)
                     cross_attention_scores = post_process_attention_scores(cross_attention_scores)
                     attention_probs = [self_attention_scores, cross_attention_scores]
@@ -679,6 +696,10 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
 
                 # project decoder output to vocabulary-size dimensions
                 token_logits = [self.tokens_heads[i](dec_output)[0] for i in range(self.n_proj_heads)]
+                if self.share_decoder_tokens_head_embeddings:
+                    token_logits[0] = self.tokens_head(dec_output, self.word_embeddings_weight())
+                else:
+                    token_logits[0] = self.tokens_head(dec_output)[0]
 
                 if labels is not None:
                     # compute loss here
@@ -691,19 +712,37 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
                     # tensor_parallel.vocab_parallel_cross_entropy performs log_softmax and return log p(x_i|z) per token i
                     if self.fp16_cross_entropy:
                         assert token_logits.dtype == torch.half
-                        tokens_loss = torch.stack([
-                            vocab_parallel_cross_entropy(token_logits[i], labels[:, :, i]-sum(self.proj_head_dims[:i]), label_smoothing) for i in range(self.n_proj_heads)
-                        ], axis=2)
+                        tokens_loss = torch.stack(
+                            [
+                                vocab_parallel_cross_entropy(
+                                    token_logits[i], labels[:, :, i] - sum(self.proj_head_dims[:i]), label_smoothing
+                                )
+                                for i in range(self.n_proj_heads)
+                            ],
+                            axis=2,
+                        )
                     else:
-                        tokens_loss = torch.stack([
-                            vocab_parallel_cross_entropy(token_logits[i].float(), labels[:, :, i]-sum(self.proj_head_dims[:i]), label_smoothing) for i in range(self.n_proj_heads)
-                        ], axis=2)
-                    
+                        tokens_loss = torch.stack(
+                            [
+                                vocab_parallel_cross_entropy(
+                                    token_logits[i].float(),
+                                    labels[:, :, i] - sum(self.proj_head_dims[:i]),
+                                    label_smoothing,
+                                )
+                                for i in range(self.n_proj_heads)
+                            ],
+                            axis=2,
+                        )
+
                     # import pdb; pdb.set_trace()
 
                     # [s, b] -> [b, s]
                     tokens_loss = tokens_loss.transpose(0, 1).contiguous()
-                    tokens_loss = tokens_loss * torch.FloatTensor(self.proj_head_loss_weights).to(tokens_loss.device) / sum(self.proj_head_loss_weights)
+                    tokens_loss = (
+                        tokens_loss
+                        * torch.FloatTensor(self.proj_head_loss_weights).to(tokens_loss.device)
+                        / sum(self.proj_head_loss_weights)
+                    )
                     # check if hiddens is used
                     if return_all_selfattention_probs or return_all_crossattention_probs:
                         return tokens_loss, attention_probs
@@ -713,11 +752,13 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
                     # else return token logits (and hiddens if needed)
                     token_logits_blank = torch.full(
                         (*token_logits[0].shape[:2], sum(self.proj_head_dims), len(token_logits)),
-                        -float('Inf'), 
-                        device=token_logits[0].device
+                        -float('Inf'),
+                        device=token_logits[0].device,
                     )
                     for i in range(len(token_logits)):
-                        token_logits_blank[:, :, sum(self.proj_head_dims[:i]):sum(self.proj_head_dims[:i+1]), i] = token_logits[i]
+                        token_logits_blank[
+                            :, :, sum(self.proj_head_dims[:i]) : sum(self.proj_head_dims[: i + 1]), i
+                        ] = token_logits[i]
                     # [s, b, h, heads] -> [b, s, h, heads]
                     token_logits = token_logits_blank.transpose(0, 1).contiguous()
                     if return_all_selfattention_probs or return_all_crossattention_probs:
@@ -741,11 +782,12 @@ class MegatronTokenLevelEncoderDecoderMultiProjModule(MegatronTokenLevelEncoderD
         self.decoder_embedding.load_state_dict(state_dict[self._decoder_embedding_key], strict=strict)
         self.enc_dec_model.load_state_dict(state_dict[self._enc_dec_model_key], strict=strict)
         self.tokens_heads.load_state_dict(state_dict[self._tokens_head_key], strict=False)
+        self.tokens_head.load_state_dict(state_dict['tokens_head'], strict=strict)
 
 
 class SumMultiEmbedding(Embedding):
-    """Language model embeddings with multiple tokens at each time step. The embeddings of the tokens of the same time step will be computed separately and then be summed together.
-    """
+    """Language model embeddings with multiple tokens at each time step. The embeddings of the tokens of the same time step will be computed separately and then be summed together."""
+
     def __init__(
         self,
         config: ModelParallelConfig,
@@ -759,7 +801,8 @@ class SumMultiEmbedding(Embedding):
         position_embedding_type='learned_absolute',
         transpose_batch_sequence=True,
     ):
-        super().__init__(config,
+        super().__init__(
+            config,
             hidden_size,
             vocab_size,
             max_sequence_length,

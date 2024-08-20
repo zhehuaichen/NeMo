@@ -228,7 +228,7 @@ model:
       #     lang: en
       #     pnc: no
       - type: lhotse_shar
-        shar_path: /workspace/data/s2s_shars/es_mini/
+        shar_path: manifests/es_mini_prompt2/
         weight: 1.0
         tags:
           lang: en
@@ -292,7 +292,7 @@ model:
             s2tt: True
           input_cfg:
             - type: lhotse_shar
-              shar_path: /workspace/data/s2s_shars/es_mini/
+              shar_path: manifests/es_mini_prompt2/
               weight: 1.0
               tags:
                 lang: en
