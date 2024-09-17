@@ -230,6 +230,7 @@ model:
   data:
     end_string: "[EOG]"
     train_ds:
+      manifest_filepath: ??? # Path to a list of JSONL files
       # Example of how to specify paths to multiple datasets
       # manifest_filepath:
       #   - /path/to/squad.jsonl
@@ -283,6 +284,7 @@ model:
       duration_bins: null
 
     validation_ds:
+      manifest_filepath: ??? # Path to a list of JSONL files
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
       shuffle: False
