@@ -373,6 +373,11 @@ class LazyNeMoTarredIterator:
             tar_path = self.shard_id_to_tar_path[sid]
             with tarfile.open(fileobj=open_best(tar_path, mode="rb"), mode="r|*") as tar:
                 for tar_info in tar:
+                    if tar_info.name not in shard_manifest:
+                        logging.warning(
+                            f"Skipping tar entry '{tar_info.name}' because it's not present in the JSON manifest."
+                        )
+                        continue
                     assert tar_info.name in shard_manifest, (
                         f"Mismatched entry between JSON manifest ('{manifest_path}') and tar file ('{tar_path}'). "
                         f"Cannot locate JSON entry for tar file '{tar_info.name}'"
