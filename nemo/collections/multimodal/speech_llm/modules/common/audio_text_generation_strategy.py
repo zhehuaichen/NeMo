@@ -175,11 +175,11 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         """initialize the batch data before the inference steps."""
         # Move to GPU.
         context_lengths = self.context_lengths
-        cl = context_lengths[0]
-        assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
         audio_length = self.audio_length
         audio_signal = self.audio_signal[:]
         if 'waitk_lagging' in strategy_args:
+            cl = context_lengths[0]
+            assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
             waitk_lagging = strategy_args['waitk_lagging']
             pre_decision_ratio = strategy_args['pre_decision_ratio']
             sample_rate = strategy_args.get('sample_rate', 16000)
@@ -257,6 +257,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                 _,
                 (speech_encoded, speech_encoded_len, extra_outputs),
             ) = self.model.prepare_llm_input(batch, **strategy_args)
+            self.extra_outputs = {}
 
         if 'waitk_lagging' in strategy_args:
             speech_encoded_len = torch.minimum(

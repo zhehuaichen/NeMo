@@ -42,7 +42,7 @@ from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     MultiAudioPerceptionModule,
 )
 from nemo.collections.multimodal.speech_llm.parts.mixins.adapter_mixin import SpeechLLMAdapterMixin
-from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import get_nested_dict_value, compute_waitk_lagging
+from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import compute_waitk_lagging, get_nested_dict_value
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import MegatronGPTSFTModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
@@ -266,8 +266,12 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
     ):
         """Inject audio features into the text input and return the final input embeddings to LLM."""
         # [b, t, c]
+        if self.cfg.get('megatron_amp_O2', False):
+            base_module = self.model.module
+        else:
+            base_module = self.model
         lm_embedding = (
-            self.model.language_model.embedding if hasattr(self.model, 'language_model') else self.model.embedding
+            base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
         )
         input_embeds = lm_embedding.word_embeddings(input_ids)
         if isinstance(encoded, torch.Tensor):
@@ -309,8 +313,12 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
 
     def _get_text_embeddings(self, text_tokens, position_ids):
         """Get text embeddings for the input text tokens."""
+        if self.cfg.get('megatron_amp_O2', False):
+            base_module = self.model.module
+        else:
+            base_module = self.model
         lm_embedding = (
-            self.model.language_model.embedding if hasattr(self.model, 'language_model') else self.model.embedding
+            base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
         )
         text_embeddings = lm_embedding.word_embeddings(text_tokens)  # (batch_size, seq_len, hidden_size)
         if hasattr(lm_embedding, 'position_embeddings'):
@@ -366,6 +374,8 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         self, input_ids, position_ids, encoder_input, attention_mask, labels, checkpoint_activations_all_layers
     ):
         """Forward pass of the GPT model."""
+        if self.megatron_amp_O2:
+            encoder_input = encoder_input.type(self.model.module.embedding.word_embeddings.weight.dtype)
         if self.mcore_gpt:
             output = self.model(
                 input_ids=input_ids,
@@ -590,6 +600,8 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             ):
                 attention_mask = None
 
+            if self.megatron_amp_O2:
+                input_embeddings = input_embeddings.type(self.model.module.embedding.word_embeddings.weight.dtype)
             output_tensor = model(
                 input_ids=None,
                 position_ids=None,
@@ -1288,8 +1300,9 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             context_lengths = batch['context_lengths']
             assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
             predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
-            metadata = compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args,  self.tokenizer)
-
+            metadata = compute_waitk_lagging(
+                batch, predicted_token_ids, metadata, labels_text, strategy_args, self.tokenizer
+            )
 
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
@@ -1702,18 +1715,26 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             processed_signal_length=None,
         )
         input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
-        if 'waitk_lagging' not in self.get_inference_config():
+        if self.get_inference_config() is None or 'waitk_lagging' not in self.get_inference_config():
             encoder_input, extra_outputs = self.perception_cross_attn(
-                encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True,
+                encoded,
+                encoded_len,
+                input_embeds,
+                input_lengths=input_length,
+                return_mems=True,
             )
         else:  # am xattn only in answer emb, used in waitk training/eval/inference
             # empty fixed feature for attention masking
-            encoded = torch.cat([encoded, torch.zeros_like(encoded[:,:1])], dim=1)
+            encoded = torch.cat([encoded, torch.zeros_like(encoded[:, :1])], dim=1)
             # b l t
             b, l, _ = input_embeds.shape
-            t= encoded.shape[1]
+            t = encoded.shape[1]
             NEG_INF = -10000.0
-            if hasattr(self.cfg, 'streaming') and self.cfg.streaming is not None and self.cfg.streaming.get('waitk_lagging_max', 0) > 0:
+            if (
+                hasattr(self.cfg, 'streaming')
+                and self.cfg.streaming is not None
+                and self.cfg.streaming.get('waitk_lagging_max', 0) > 0
+            ):
                 # sample waitk in training and eval stage
                 waitk_lagging_max = self.cfg.streaming.waitk_lagging_max
                 waitk_lagging_min = self.cfg.streaming.get('waitk_lagging_min', 1)
@@ -1728,22 +1749,31 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
                     pre_decision_ratio = kwargs['pre_decision_ratio']
                 else:
                     pre_decision_ratio = 10000  # non streaming
-            enc_dec_attn_mask = torch.zeros([b,l,t], device=input_length.device)
+            enc_dec_attn_mask = torch.zeros([b, l, t], device=input_length.device)
             for i in range(b):
                 if 'waitk_lagging' in kwargs:
                     waitk_lagging = kwargs['waitk_lagging']
                 else:
-                    waitk_lagging = torch.randint(waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device)
+                    waitk_lagging = torch.randint(
+                        waitk_lagging_min, waitk_lagging_max, (1,), device=input_length.device
+                    )
                 for j in range(l):
-                    if j < audio_batch['context_lengths'][i]-1:
-                        enc_dec_attn_mask[i, j,  -1] = 1  # empty feature for masking
+                    if j < audio_batch['context_lengths'][i] - 1:
+                        enc_dec_attn_mask[i, j, -1] = 1  # empty feature for masking
                     elif j < input_length[i]:
-                        enc_dec_attn_mask[i, j,  : (j - audio_batch['context_lengths'][i] + 1 + waitk_lagging)*pre_decision_ratio] = 1
+                        enc_dec_attn_mask[
+                            i, j, : (j - audio_batch['context_lengths'][i] + 1 + waitk_lagging) * pre_decision_ratio
+                        ] = 1
             enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
             enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
 
             encoder_input, extra_outputs = self.perception_cross_attn(
-                encoded, encoded_len, input_embeds, input_lengths=input_length, return_mems=True, enc_dec_attn_mask=enc_dec_attn_mask,
+                encoded,
+                encoded_len,
+                input_embeds,
+                input_lengths=input_length,
+                return_mems=True,
+                enc_dec_attn_mask=enc_dec_attn_mask,
             )
         # TODO: need separate speech and text methods for inference
         if 'audio_ratio' in audio_batch:
