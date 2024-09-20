@@ -398,6 +398,9 @@ class LazyNeMoTarredIterator:
                     cuts_for_recording = []
                     for data in sorted(shard_manifest[tar_info.name], key=lambda d: d["audio_filepath"]):
                         # Cut the recording into corresponding segment and discard audio data outside the segment.
+                        if data.get("duration") == 0:
+                            logging.warning(f"Skipping data with zero duration: {tar_info.name}")
+                            continue
                         cut = make_cut_with_subset_inmemory_recording(
                             recording, offset=data.get("offset", 0.0), duration=data.get("duration")
                         )
