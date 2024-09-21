@@ -226,7 +226,10 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                     decoder_mems_list=decoder_mems_list,
                 )
                 encoder_input = torch.cat([encoder_input_prev, encoder_input, input_embeds[:, context_length:]], dim=1)
-                base_module = self.model.model
+                if self.model.megatron_amp_O2:
+                    base_module = self.model.model.module
+                else:
+                    base_module = self.model.model
                 lm_embedding = (
                     base_module.language_model.embedding
                     if hasattr(base_module, 'language_model')
