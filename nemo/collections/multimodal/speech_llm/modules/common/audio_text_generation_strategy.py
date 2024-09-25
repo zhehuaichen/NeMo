@@ -40,6 +40,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        **strategy_args,
     ):
         """initialize the batch data before the inference steps."""
         # Move to GPU.
@@ -94,6 +95,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         context_lengths: torch.Tensor,
         curr_context_length: int,
         compute_attention_mask: bool,
+        **strategy_args,
     ) -> Tuple[List[torch.Tensor], List[int]]:
         # types2use = None
         if step == 0:
