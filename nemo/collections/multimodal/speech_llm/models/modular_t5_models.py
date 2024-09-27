@@ -38,6 +38,7 @@ from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     MultiAudioPerceptionModule,
 )
 from nemo.collections.nlp.models.language_modeling.megatron_t5_adapter_model import MegatronT5LoraModel
+from nemo.collections.nlp.models.language_modeling.megatron_t5_model import MegatronT5Model
 from nemo.collections.nlp.models.language_modeling.megatron_t5_sft_model import MegatronT5SFTModel
 from nemo.collections.nlp.models.nlp_model import NLPModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
@@ -51,19 +52,6 @@ from nemo.core.classes.mixins import adapter_mixins
 from nemo.utils import AppState, logging, model_utils
 
 try:
-    from apex.transformer.pipeline_parallel.utils import (
-        _reconfigure_microbatch_calculator,
-        get_current_global_batch_size,
-        get_micro_batch_size,
-        get_num_microbatches,
-    )
-
-    HAVE_APEX = True
-except (ImportError, ModuleNotFoundError):
-    HAVE_APEX = False
-from nemo.collections.nlp.models.language_modeling.megatron_t5_model import MegatronT5Model
-
-try:
     from megatron.core import parallel_state, tensor_parallel
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
@@ -72,8 +60,27 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE = False
 
+try:
+    from megatron.core.num_microbatches_calculator import (
+        get_current_global_batch_size,
+        get_micro_batch_size,
+        get_num_microbatches,
+        reconfigure_num_microbatches_calculator,
+    )
 
-__all__ = ["ModularizedAudioT5Model"]
+except (ImportError, ModuleNotFoundError):
+    logging.warning("Megatron num_microbatches_calculator not found, using Apex version.")
+    from apex.transformer.pipeline_parallel.utils import (
+        _reconfigure_microbatch_calculator as reconfigure_num_microbatches_calculator,
+    )
+    from apex.transformer.pipeline_parallel.utils import (
+        get_current_global_batch_size,
+        get_micro_batch_size,
+        get_num_microbatches,
+    )
+
+
+__all__ = ["ModularizedAudioT5Model", "DecoderTextPromptModularizedAudioT5Model"]
 
 
 default_inference_config = {'tokens_to_generate': 30}
@@ -146,7 +153,10 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             self.hidden_size = self.frozen_model.cfg.hidden_size
 
         # Handle this when moving GPT prompt learning to the base class.
-        self.word_embeddings = self.frozen_model.enc_dec_model.encoder_embedding.word_embeddings
+        if self.megatron_amp_O2:
+            self.word_embeddings = self.frozen_model.enc_dec_model.module.encoder_embedding
+        else:
+            self.word_embeddings = self.frozen_model.enc_dec_model.encoder_embedding
 
         self._reduced_loss_buffer = []
         self._inference_config = None
@@ -280,7 +290,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             return concat_emb, concat_len
 
         # [b, t, c]
-        lm_embedding = self.frozen_model.enc_dec_model.encoder_embedding
+        lm_embedding = self.word_embeddings
         input_embeds = lm_embedding.word_embeddings(input_ids)
         if self.cfg.audio_prompt_first:
             encoder_input, encoder_length = _concat_embs(encoded, encoded_len, input_embeds, input_length)
@@ -815,7 +825,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
                 != data_cfg.global_batch_size // parallel_state.get_data_parallel_world_size()
             ):
                 app_state = AppState()
-                _reconfigure_microbatch_calculator(
+                reconfigure_num_microbatches_calculator(
                     rank=app_state.global_rank,
                     rampup_batch_size=None,
                     global_batch_size=global_batch_size_per_gpu * parallel_state.get_data_parallel_world_size(),
@@ -825,7 +835,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
             # NOTE: need to explicitly handle resetting for multi-validation
             else:
                 app_state = AppState()
-                _reconfigure_microbatch_calculator(
+                reconfigure_num_microbatches_calculator(
                     rank=app_state.global_rank,
                     rampup_batch_size=None,
                     global_batch_size=data_cfg.global_batch_size,
@@ -1114,7 +1124,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         app_state = AppState()
         # TODO(zhehuai): add _restore_sequence_parallelism_args after sync to HEAD
         if hasattr(self, "_train_ds"):
-            _reconfigure_microbatch_calculator(
+            reconfigure_num_microbatches_calculator(
                 rank=app_state.global_rank,
                 rampup_batch_size=None,
                 global_batch_size=self.cfg.data.train_ds.global_batch_size,
@@ -1124,7 +1134,7 @@ class ModularizedAudioT5Model(MegatronT5LoraModel):
         # When running `trainer.validate()`, the training dataset is not available.
         else:
             logging.warning('No training data found, reconfiguring microbatches based on validation batch sizes.')
-            _reconfigure_microbatch_calculator(
+            reconfigure_num_microbatches_calculator(
                 rank=app_state.global_rank,
                 rampup_batch_size=None,
                 global_batch_size=data_cfg.global_batch_size,

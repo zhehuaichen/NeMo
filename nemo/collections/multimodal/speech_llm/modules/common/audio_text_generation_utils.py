@@ -27,16 +27,7 @@ from nemo.collections.multimodal.speech_llm.modules.common.audio_text_generation
     model_inference_strategy_dispatcher,
 )
 from nemo.collections.nlp.modules.common.transformer.text_generation import OutputType
-from nemo.utils import AppState
-
-try:
-    from apex.transformer.pipeline_parallel.utils import _reconfigure_microbatch_calculator
-
-    HAVE_APEX = True
-
-except (ImportError, ModuleNotFoundError):
-
-    HAVE_APEX = False
+from nemo.utils import AppState, logging
 
 try:
     from megatron.core import parallel_state, tensor_parallel
@@ -46,6 +37,15 @@ try:
 except (ImportError, ModuleNotFoundError):
 
     HAVE_MEGATRON_CORE = False
+
+try:
+    from megatron.core.num_microbatches_calculator import reconfigure_num_microbatches_calculator
+
+except (ImportError, ModuleNotFoundError):
+    logging.warning("Megatron num_microbatches_calculator not found, using Apex version.")
+    from apex.transformer.pipeline_parallel.utils import (
+        _reconfigure_microbatch_calculator as reconfigure_num_microbatches_calculator,
+    )
 
 __all__ = [
     "get_computeprob_response",
@@ -351,6 +351,25 @@ def generate(
     num_audios = None
     context_start_idx = None
     audio_signal, audio_signal_length = None, None
+    if isinstance(inputs, tuple) and len(inputs) == 2:
+        context_tokens_tensor, context_length_tensor = inputs
+    elif isinstance(inputs, tuple) and len(inputs) == 4:
+        context_tokens_tensor, context_length_tensor, audio_signal, audio_signal_length = inputs
+    elif isinstance(inputs, tuple) and len(inputs) == 6:  # multi-audio
+        has_multi_audios = True
+        (
+            context_tokens_tensor,
+            context_length_tensor,
+            audio_signal,
+            audio_signal_length,
+            num_audios,
+            context_start_idx,
+        ) = inputs
+    else:
+        context_tokens_tensor, context_length_tensor = inference_strategy.tokenize_batch(
+            inputs, tokens_to_generate, add_BOS
+        )
+    """  to unblock TP inference
     if torch.distributed.get_rank() == text_generation_utils.get_model_parallel_src_rank():
         if isinstance(inputs, tuple) and len(inputs) == 2:
             context_tokens_tensor, context_length_tensor = inputs
@@ -408,6 +427,7 @@ def generate(
             num_audios,
             context_start_idx,
         ) = receive_generate_info(has_multi_audios)
+    """
 
     output = synced_generate(
         model,
@@ -524,7 +544,7 @@ def sample_sequence_batch(
 ):
     app_state = AppState()
     micro_batch_size = context_tokens.shape[0]
-    _reconfigure_microbatch_calculator(
+    reconfigure_num_microbatches_calculator(
         rank=app_state.global_rank,
         rampup_batch_size=None,
         global_batch_size=micro_batch_size,

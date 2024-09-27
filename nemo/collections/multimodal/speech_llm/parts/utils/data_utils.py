@@ -16,6 +16,9 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+from lhotse.cut import Cut
+
+from nemo.collections.common.prompts import PromptFormatter, get_prompt_format_fn
 from nemo.utils import logging, logging_mode
 
 
@@ -169,6 +172,7 @@ def to_cuda(inputs, non_blocking=True):
     else:
         return inputs
 
+
 def compute_al(delays, source_length, target_length):
     if delays[0] > source_length:
         return delays[0]
@@ -184,6 +188,7 @@ def compute_al(delays, source_length, target_length):
             break
     AL /= tau
     return AL
+
 
 def compute_laal(delays, source_length, target_length):
     if delays[0] > source_length:
@@ -201,7 +206,10 @@ def compute_laal(delays, source_length, target_length):
     LAAL /= tau
     return LAAL
 
-def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args, tokenizer, BOW_PREFIX = "\u2581"):
+
+def compute_waitk_lagging(
+    batch, predicted_token_ids, metadata, labels_text, strategy_args, tokenizer, BOW_PREFIX="\u2581"
+):
     waitk_lagging = strategy_args['waitk_lagging']
     pre_decision_ratio = strategy_args['pre_decision_ratio']
     target_length = [len(a.tolist()) - a.tolist().count(tokenizer.eos_id) + 1 for a in batch['answers']]
@@ -214,7 +222,7 @@ def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, str
         audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
         for j, cur_t in enumerate(tokens):
             cur_src_len = (j + waitk_lagging) * pre_decision_ratio + right_context
-            cur_src_len*=audio_encoder_fs
+            cur_src_len *= audio_encoder_fs
             cur_src_len = min(audio_signal_length, cur_src_len)
             spm = tokenizer.vocab[cur_t]
             # reach word boundary
@@ -227,7 +235,6 @@ def compute_waitk_lagging(batch, predicted_token_ids, metadata, labels_text, str
         metadata[i]['LAAL'] = compute_laal(lagging, audio_signal_length, target_length_word[i]).tolist()
         metadata[i]['AL'] = compute_al(lagging, audio_signal_length, target_length_word[i]).tolist()
     return metadata
-
 
 
 def build_loss_mask(processed_example: dict, answer_only_loss: bool = True):
@@ -325,7 +332,7 @@ class TextProcessing:
         else:
             self.eos_id = None
 
-        if hasattr(tokenizer, "pad_id") and tokenizer.pad_id > 0:
+        if hasattr(tokenizer, "pad_id") and tokenizer.pad_id != None and tokenizer.pad_id > 0:
             self.pad_id = tokenizer.pad_id
         else:
             self.pad_id = self.eos_id if self.eos_id is not None else 0
@@ -384,7 +391,7 @@ class TextProcessing:
         else:
             pre_pad = []
         answer_text = text[len(context) :]
-        answer_ids = pre_pad + self.tokenizer.text_to_ids(answer_text, self.sample_alpha)
+        answer_ids = pre_pad + self.tokenizer.text_to_ids(answer_text)
         if self.end_string:
             answer_ids += self.tokenizer.text_to_ids(self.end_string)
 
@@ -452,3 +459,61 @@ class TextProcessing:
         }
 
         return processed_example
+
+
+class PromptFormatterTextProcessing:
+    """
+    Text processing pipeline for speech_llm data loader.
+    This class was initially adapted from the one used in nemo/collections/nlp/data/language_modeling/megatron/gpt_sft_dataset.py
+    and later refactored to use the new PromptFormatter API.
+
+    Args:
+        tokenizer: text tokenizer object
+        prompt_format (Optional[str]): name of the prompt formatter to be applied.
+    """
+
+    def __init__(
+        self,
+        tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        prompt_format: Optional[str] = None,
+        audio_locator: Optional[str] = None,
+    ):
+        self.prompt_format_fn = get_prompt_format_fn(prompt_format)
+        self.tokenizer = tokenizer
+        self.audio_locator = audio_locator
+        self.audio_locator_id = self.tokenizer.text_to_ids(audio_locator) if audio_locator is not None else None
+        if hasattr(tokenizer, "pad_id") and tokenizer.pad_id != None and tokenizer.pad_id > 0:
+            self.pad_id = tokenizer.pad_id
+        else:
+            self.pad_id = (
+                self.tokenizer.eos_id if self.tokenizer.eos_id is not None and self.tokenizer.eos_id > 0 else 0
+            )
+
+    def _process_example(self, cut: Cut):
+        ans = self.prompt_format_fn([cut], self.tokenizer)
+        ans = {k: v[0] for k, v in ans.items()}
+        context_start_idx = [0]
+        if self.audio_locator_id is not None:
+            if len(self.audio_locator_id) == 1:  # fast case, special "insert audio" token
+                context_start_idx = (ans["context_ids"] == self.audio_locator_id).nonzero().flatten()
+            else:  # slow case, no dedicated token, got tokenized into multiple tokens; substring search
+                context_start_idx = _find_substring_indices(ans["context_ids"], self.audio_locator_id)
+        return {
+            'input_ids': ans["input_ids"],
+            'answer_start_idx': len(ans["context_ids"]),
+            'context_ids': ans["context_ids"],
+            'context_length': len(ans["context_ids"]),
+            'answer_ids': ans["answer_ids"],
+            'context_start_idx': context_start_idx,
+        }
+
+
+def _find_substring_indices(string: torch.Tensor, substring: torch.Tensor) -> torch.Tensor:
+    string_len = string.size(0)
+    substring_len = substring.size(0)
+    if substring_len > string_len:
+        return torch.tensor([], dtype=torch.long)
+    windows = string.unfold(0, substring_len, 1)
+    matches = (windows == substring).all(dim=1)
+    indexes = matches.nonzero().flatten()
+    return indexes

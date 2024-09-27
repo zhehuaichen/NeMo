@@ -25,6 +25,7 @@ from hydra.utils import get_class
 from omegaconf import ListConfig
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import OmegaConf, open_dict
+from pytorch_lightning.loops.fetchers import _DataFetcherWrapper
 from pytorch_lightning.trainer.trainer import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -48,6 +49,7 @@ from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import
 from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     build_position_ids,
+    get_iterator_k_split,
 )
 from nemo.collections.nlp.modules.common.text_generation_utils import get_computeprob_response
 from nemo.collections.nlp.parts.peft_config import PEFT_CONFIG_MAP
@@ -59,23 +61,30 @@ from nemo.utils import AppState, logging, model_utils
 from nemo.utils.model_utils import inject_model_parallel_rank
 
 try:
-    from apex.transformer.pipeline_parallel.utils import _reconfigure_microbatch_calculator, get_num_microbatches
-
-    HAVE_APEX = True
-except (ImportError, ModuleNotFoundError):
-    HAVE_APEX = False
-
-try:
     from megatron.core import InferenceParams, parallel_state, tensor_parallel
     from megatron.core.models.gpt import GPTModel as MCoreGPTModel
+    from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
     HAVE_MEGATRON_CORE = True
 
 except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE = False
 
+try:
+    from megatron.core.num_microbatches_calculator import (
+        get_micro_batch_size,
+        get_num_microbatches,
+        reconfigure_num_microbatches_calculator,
+    )
 
-__all__ = ["ModularAudioGPTModel"]
+except (ImportError, ModuleNotFoundError):
+    logging.warning("Megatron num_microbatches_calculator not found, using Apex version.")
+    from apex.transformer.pipeline_parallel.utils import (
+        _reconfigure_microbatch_calculator as reconfigure_num_microbatches_calculator,
+    )
+    from apex.transformer.pipeline_parallel.utils import get_micro_batch_size, get_num_microbatches
+
+__all__ = ["ModularAudioGPTModel", "CrossAttendModularAudioGPTModel"]
 
 
 default_inference_config = {'tokens_to_generate': 30}
@@ -436,13 +445,6 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         since we have mixed text/audio dataloading and sometimes one of the modalities might be missing.
         """
         # TODO(pzelasko): I marked the sections that are modified from the original with TODOs like this one.
-
-        # Local imports mimic global imports in the original file that had this func.
-        from apex.transformer.pipeline_parallel.utils import get_micro_batch_size
-        from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-        from pytorch_lightning.loops.fetchers import _DataFetcherWrapper
-
-        from nemo.collections.nlp.modules.common.megatron.utils import get_iterator_k_split
 
         # Return only batch if batch, batch_idx, dataloder_idx are extracted as a tuple in the previous func
         # call like validation_step otherwise return tuple (in which case dataloader_iter is still a PTL _DataFetcherWrapper object)
@@ -1016,8 +1018,8 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         """
         if pretrained_model_cfg:
             model_cfg = pretrained_model_cfg
-        elif cfg.model.peft.restore_from_path:
-            if cfg.model.peft.restore_from_path.endswith(".nemo"):
+        elif cfg.model.peft.restore_from_path or cfg.model.peft.restore_from_ckpt.checkpoint_dir:
+            if cfg.model.peft.restore_from_path and cfg.model.peft.restore_from_path.endswith(".nemo"):
                 model_cfg = ModularAudioGPTModel.restore_from(
                     restore_path=cfg.model.peft.restore_from_path,
                     trainer=trainer,
@@ -1398,7 +1400,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             response = generate(self, **inference_config)
 
         app_state = AppState()
-        _reconfigure_microbatch_calculator(
+        reconfigure_num_microbatches_calculator(
             rank=app_state.global_rank,
             rampup_batch_size=None,
             global_batch_size=global_batch_size_per_gpu * parallel_state.get_data_parallel_world_size(),
@@ -1567,7 +1569,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         app_state = AppState()
         self._restore_activation_checkpointing_args()
         if hasattr(self, "_train_ds"):
-            _reconfigure_microbatch_calculator(
+            reconfigure_num_microbatches_calculator(
                 rank=app_state.global_rank,
                 rampup_batch_size=None,
                 global_batch_size=self.cfg.data.train_ds.global_batch_size,
@@ -1577,7 +1579,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         # When running `trainer.validate()`, the training dataset is not available.
         else:
             logging.warning('No training data found, reconfiguring microbatches based on validation batch sizes.')
-            _reconfigure_microbatch_calculator(
+            reconfigure_num_microbatches_calculator(
                 rank=app_state.global_rank,
                 rampup_batch_size=None,
                 global_batch_size=data_cfg.global_batch_size,
@@ -1679,6 +1681,49 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         )
         results.append(model)
         return results
+
+    def configure_sharded_model(self):
+        """Modified version from MegatronBaseModel.
+
+        1. exclude self.model.embedding
+        2. include speech encoder and modality adapter.
+        """
+
+        def find_frozen_submodules(model):
+            frozen_submodules = []
+            frozen_submodule_names = []
+            for name, module in model.named_modules():
+                if (
+                    isinstance(module, torch.nn.Module)
+                    and list(module.parameters())
+                    and all(not param.requires_grad for param in module.parameters())
+                ):
+                    frozen_submodule_names.append(name)
+                    frozen_submodules.append(module)
+            return frozen_submodule_names, frozen_submodules
+
+        if self.use_fsdp:
+            """Top-evel FSDP model sharding"""
+            # Shard the top-level model hierarchically. We shard the strategy-unwrapped model not
+            # to lose the structure of non-FSDP wrapped parameters (e.g, embedding)
+            # TODO: Currently the main parameter data type is kept in fp32 (when O2=False). This needs to be
+            # extended to support lower precision main parameters.
+            frozen_submodule_names, frozen_submodules = find_frozen_submodules(self.model)
+            self.trainer.strategy.kwargs['ignored_states'] = frozen_submodules
+            # Exclude embedding layer to avoid errors in inject_perception_input
+            self.trainer.strategy.kwargs['ignored_states'].append(self.model.embedding)
+            # FSDP requires uniform status of require_grads
+            # Diffusion models like SD has frozen parts and needs to be added to 'ignored_states' from sharding for FSDP to work
+            self.model = self.trainer.strategy._setup_model(self.model)
+            # Move the CPU-initialized model (with `use_cpu_initialization=True`) to GPU, which is to avoid
+            # out-of-memory carash before sharding. In case of GPU-initialized model, this is no-op.
+            self.model = self.model.cuda(torch.cuda.current_device())
+
+            # Shard perception module
+            frozen_submodule_names, frozen_submodules = find_frozen_submodules(self.perception)
+            self.trainer.strategy.kwargs['ignored_states'].extend(frozen_submodules)
+            self.perception = self.trainer.strategy._setup_model(self.perception)
+            self.perception = self.perception.cuda(torch.cuda.current_device())
 
 
 class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
@@ -1809,3 +1854,15 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             return return_state_dict
         else:
             return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+    def configure_sharded_model(self):
+        """Modified version from MegatronBaseModel.
+
+        1. exclude self.model.embedding
+        2. include speech encoder and modality adapter.
+        """
+        super().configure_sharded_model()
+
+        if self.use_fsdp:
+            self.perception_cross_attn = self.trainer.strategy._setup_model(self.perception_cross_attn)
+            self.perception_cross_attn = self.perception_cross_attn.cuda(torch.cuda.current_device())

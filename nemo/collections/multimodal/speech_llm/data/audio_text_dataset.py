@@ -29,7 +29,7 @@ from nemo.collections.asr.data.audio_to_text import (
 )
 from nemo.collections.asr.data.audio_to_text_dataset import ConcatDataset, convert_to_config_list, get_chain_dataset
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
-from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
+from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.common.parts.preprocessing import collections
 from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import (
     TextProcessing,
@@ -70,7 +70,7 @@ def _audio_collate_fn(audio_signals, audio_lengths):
     """
 
     max_audio_len = 0
-    has_audio = audio_lengths[0] is not None
+    has_audio = len(audio_lengths) > 0 and audio_lengths[0] is not None
     if has_audio:
         max_audio_len = max(audio_lengths).item()
 
