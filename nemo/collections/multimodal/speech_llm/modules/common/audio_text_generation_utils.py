@@ -222,6 +222,7 @@ def synced_generate(
     min_tokens_to_generate=0,
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    **strategy_args,
 ):
     context_length = context_length_tensor.min().item()
     tokenizer = model.tokenizer
@@ -250,6 +251,7 @@ def synced_generate(
             },
             num_audios=num_audios,
             context_start_idx=context_start_idx,
+            **strategy_args,
         )
 
     for tokens, lengths, output_logits, full_logits, audio_feat_lens in batch_token_iterator:
@@ -447,6 +449,7 @@ def generate(
         min_tokens_to_generate=min_tokens_to_generate,
         num_audios=num_audios,
         context_start_idx=context_start_idx,
+        **strategy_args,
     )
     special_tokens = set()
     if hasattr(tokenizer, 'pad_token') and tokenizer.pad_token is not None:
@@ -537,6 +540,7 @@ def sample_sequence_batch(
     extra={},
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    **strategy_args,
 ):
     app_state = AppState()
     micro_batch_size = context_tokens.shape[0]
@@ -569,6 +573,7 @@ def sample_sequence_batch(
             compute_attention_mask,
             num_audios,
             context_start_idx,
+            **strategy_args,
         )
         audio_text_context_lengths = context_lengths + audio_feat_lens
         context_length = audio_text_context_lengths.min().item()
@@ -595,6 +600,7 @@ def sample_sequence_batch(
                 audio_text_context_lengths,
                 context_length,
                 compute_attention_mask,
+                **strategy_args,
             )
             output = inference_strategy.forward_step(batch, tensor_shape)
             if parallel_state.is_pipeline_last_stage():

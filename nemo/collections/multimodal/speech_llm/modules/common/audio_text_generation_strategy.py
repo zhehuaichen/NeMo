@@ -40,6 +40,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        **strategy_args,
     ):
         """initialize the batch data before the inference steps."""
         # Move to GPU.
@@ -94,6 +95,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         context_lengths: torch.Tensor,
         curr_context_length: int,
         compute_attention_mask: bool,
+        **strategy_args,
     ) -> Tuple[List[torch.Tensor], List[int]]:
         # types2use = None
         if step == 0:
@@ -167,6 +169,113 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
 
 
 class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
+    def init_batch_per_step(
+        self,
+        step: int,
+        **strategy_args,
+    ):
+        """initialize the batch data before the inference steps."""
+        # Move to GPU.
+        context_lengths = self.context_lengths
+        audio_length = self.audio_length
+        audio_signal = self.audio_signal[:]
+        if 'waitk_lagging' in strategy_args:
+            cl = context_lengths[0]
+            assert torch.equal(context_lengths, torch.ones_like(context_lengths) * cl)
+            waitk_lagging = strategy_args['waitk_lagging']
+            pre_decision_ratio = strategy_args['pre_decision_ratio']
+            sample_rate = strategy_args.get('sample_rate', 16000)
+            right_context = strategy_args.get('right_context', 13)
+            audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
+            # for now only support sharing the same text context for a batch
+            cur_enc_len = pre_decision_ratio * (step + waitk_lagging)
+            cur_src_len = (cur_enc_len + right_context) * audio_encoder_fs * sample_rate // 1000
+            audio_signal = audio_signal[:, :cur_src_len]
+            import numpy as np
+
+            audio_length = torch.minimum(
+                audio_length, torch.from_numpy(np.array([cur_src_len])).to(audio_length.device)
+            )
+
+            # [b, t, c]
+            speech_encoded, speech_encoded_len = self.model.perception(
+                input_signal=audio_signal,
+                input_signal_length=audio_length,
+                processed_signal=None,
+                processed_signal_length=None,
+            )
+            # call xattn for step 0
+            input_embeds = self.model._get_text_embeddings(self.context_tokens, None).transpose(0, 1)
+            if step == 1:
+                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                context_length = context_lengths[0]
+                # empty fixed feature for attention masking in context tokens
+                encoder_input_prev, self.extra_outputs = self.model.perception_cross_attn(
+                    torch.zeros_like(speech_encoded[:, :1]),
+                    torch.ones_like(speech_encoded_len),
+                    input_embeds[:, : context_length - 1],
+                    input_lengths=context_lengths - 1,
+                    return_mems=True,
+                )
+                # the first answer token prediction
+                decoder_mems_list = self.extra_outputs.get('decoder_mems_list', None)
+                encoder_input, self.extra_outputs = self.model.perception_cross_attn(
+                    speech_encoded,
+                    speech_encoded_len,
+                    input_embeds[:, context_length - 1 : context_length],
+                    input_lengths=torch.ones_like(context_lengths),
+                    return_mems=True,
+                    decoder_mems_list=decoder_mems_list,
+                )
+                encoder_input = torch.cat([encoder_input_prev, encoder_input, input_embeds[:, context_length:]], dim=1)
+                if self.model.megatron_amp_O2:
+                    base_module = self.model.model.module
+                else:
+                    base_module = self.model.model
+                lm_embedding = (
+                    base_module.language_model.embedding
+                    if hasattr(base_module, 'language_model')
+                    else base_module.embedding
+                )
+                self.attention_mask = self.model._create_attention_mask(encoder_input)
+                if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
+                    encoder_input = encoder_input.transpose(0, 1).contiguous()
+            else:
+                encoder_input = input_embeds.transpose(0, 1).contiguous()
+                self.attention_mask = self.model._create_attention_mask(encoder_input)
+            context_tokens = self.context_tokens
+        else:
+            batch = {
+                'audio_signal': audio_signal,
+                'audio_signal_length': audio_length,
+                'tokens': self.context_tokens,
+                'contexts': self.context_tokens,
+                'tokens_length': context_lengths,
+                'context_lengths': context_lengths,  # used by waitk
+                'labels': self.context_tokens,
+                'loss_mask': None,
+            }
+            (
+                encoder_input,
+                self.attention_mask,
+                context_tokens,
+                _,
+                (speech_encoded, speech_encoded_len, extra_outputs),
+            ) = self.model.prepare_llm_input(batch, **strategy_args)
+            self.extra_outputs = {}
+
+        if 'waitk_lagging' in strategy_args:
+            speech_encoded_len = torch.minimum(
+                speech_encoded_len, torch.from_numpy(np.array([cur_enc_len])).to(speech_encoded_len.device)
+            )
+            speech_encoded = speech_encoded[:, :cur_enc_len]
+        self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
+        return (
+            context_tokens,
+            (encoder_input, speech_encoded, speech_encoded_len),
+            torch.zeros_like(context_lengths),
+        )
+
     def init_batch(
         self,
         context_tokens: torch.Tensor,
@@ -176,43 +285,14 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        **strategy_args,
     ):
-        """initialize the batch data before the inference steps."""
-        # Move to GPU.
-        batch = {
-            'audio_signal': audio_signal,
-            'audio_signal_length': audio_length,
-            'tokens': context_tokens,
-            'tokens_length': context_lengths,
-            'labels': context_tokens,
-            'loss_mask': None,
-        }
-        if self.model.perception.cfg.get('combine_return', True):
-            (
-                encoder_input,
-                self.attention_mask,
-                context_tokens,
-                _,
-                (speech_encoded, speech_encoded_len, extra_outputs),
-            ) = self.model.prepare_llm_input(batch)
-            self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
-            self.extra_outputs = extra_outputs
-            return (
-                context_tokens,
-                (encoder_input, speech_encoded, speech_encoded_len),
-                torch.zeros_like(context_lengths),
-            )
-        else:
-            (
-                encoder_input,
-                self.attention_mask,
-                context_tokens,
-                _,
-                (speech_encoded, speech_encoded_len, llm_encoded_len, extra_outputs),
-            ) = self.model.prepare_llm_input(batch)
-            self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
-            self.extra_outputs = extra_outputs
-            return context_tokens, (encoder_input, speech_encoded, speech_encoded_len), llm_encoded_len
+        self.audio_signal = audio_signal[:]
+        self.audio_length = audio_length[:]
+        self.context_tokens = context_tokens[:]
+        self.context_lengths = context_lengths[:]
+
+        return self.init_batch_per_step(1, **strategy_args)
 
     def prepare_batch_at_step(
         self,
@@ -224,9 +304,9 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         context_lengths: torch.Tensor,
         curr_context_length: int,
         compute_attention_mask: bool,
+        **strategy_args,
     ) -> Tuple[List[torch.Tensor], List[int]]:
         # types2use = None
-        self.input_embeds_hidden = self.extra_outputs.get('input_embeds_hidden', None)
         input_embeddings, speech_encoded, speech_encoded_len = input_embeddings
         if step == 0:
             # Allocate memory for the entire context.
@@ -247,16 +327,25 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             decoder_mems_list = self.extra_outputs.get('decoder_mems_list', None)
             if decoder_mems_list is not None:
                 decoder_mems_list = decoder_mems_list[:, :, : curr_context_length - 1]
+            if 'waitk_lagging' in strategy_args:
+                # for now only support sharing the same text context for a batch
+                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                (_, (_, cur_speech_encoded, cur_speech_encoded_len), _) = self.init_batch_per_step(
+                    step + 1, **strategy_args
+                )
+            else:
+                cur_speech_encoded = speech_encoded
+                cur_speech_encoded_len = speech_encoded_len
+
             # need to use audio_ratio field if to support text-only decoding
             embeddings2use, self.extra_outputs = self.model.perception_cross_attn(
-                speech_encoded,
-                speech_encoded_len,
+                cur_speech_encoded,
+                cur_speech_encoded_len,
                 embeddings2use,
                 input_lengths=tokens2use.squeeze(-1) != self.model.tokenizer.eos_id,
                 decoder_mems_list=decoder_mems_list,
                 return_mems=True,
             )
-            self.input_embeds_hidden = self.extra_outputs.get('input_embeds_hidden', None)
             embeddings2use = switch(
                 input_embeddings[curr_context_length - 1].unsqueeze(0), embeddings2use.transpose(0, 1), started
             )
