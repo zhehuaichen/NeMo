@@ -222,6 +222,7 @@ def synced_generate(
     min_tokens_to_generate=0,
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    audio_locator_ids: Optional[torch.Tensor] = None,
     **strategy_args,
 ):
     context_length = context_length_tensor.min().item()
@@ -251,6 +252,7 @@ def synced_generate(
             },
             num_audios=num_audios,
             context_start_idx=context_start_idx,
+            audio_locator_ids=audio_locator_ids,
             **strategy_args,
         )
 
@@ -350,11 +352,21 @@ def generate(
     has_multi_audios = False
     num_audios = None
     context_start_idx = None
+    audio_locator_ids = None
     audio_signal, audio_signal_length = None, None
     if isinstance(inputs, tuple) and len(inputs) == 2:
         context_tokens_tensor, context_length_tensor = inputs
     elif isinstance(inputs, tuple) and len(inputs) == 4:
         context_tokens_tensor, context_length_tensor, audio_signal, audio_signal_length = inputs
+    elif isinstance(inputs, tuple) and len(inputs) == 5:  # multi-audio
+        has_multi_audios = True
+        (
+            context_tokens_tensor,
+            context_length_tensor,
+            audio_signal,
+            audio_signal_length,
+            audio_locator_ids,
+        ) = inputs
     elif isinstance(inputs, tuple) and len(inputs) == 6:  # multi-audio
         has_multi_audios = True
         (
@@ -449,6 +461,7 @@ def generate(
         min_tokens_to_generate=min_tokens_to_generate,
         num_audios=num_audios,
         context_start_idx=context_start_idx,
+        audio_locator_ids=audio_locator_ids,
         **strategy_args,
     )
     special_tokens = set()
@@ -540,6 +553,7 @@ def sample_sequence_batch(
     extra={},
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    audio_locator_ids: Optional[torch.Tensor] = None,
     **strategy_args,
 ):
     app_state = AppState()
@@ -573,6 +587,8 @@ def sample_sequence_batch(
             compute_attention_mask,
             num_audios,
             context_start_idx,
+            audio_locator_ids=audio_locator_ids,
+            tokens_to_generate=tokens_to_generate,
             **strategy_args,
         )
         audio_text_context_lengths = context_lengths + audio_feat_lens
