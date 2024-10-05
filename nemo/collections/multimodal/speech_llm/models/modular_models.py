@@ -2015,6 +2015,126 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
             encoder_input = tensor_parallel.mappings.scatter_to_sequence_parallel_region(encoder_input)
         return encoder_input, attention_mask, labels, loss_mask, (encoded, encoded_len, extra_outputs)
 
+    def prepare_llm_input_conv(self, audio_batch, return_last_audio=False, **kwargs):
+        """Prepare input for the LLM."""
+
+        # [b, t, c]
+        encoded, encoded_len = self.perception(
+            input_signal=audio_batch['audio_signal'],
+            input_signal_length=audio_batch['audio_signal_length'],
+            processed_signal=None,
+            processed_signal_length=None,
+        )
+
+        input_ids, input_length, labels, loss_mask, audio_locator_ids = (
+            audio_batch['tokens'],
+            audio_batch['tokens_length'],
+            audio_batch['labels'],
+            audio_batch['loss_mask'],
+            audio_batch['audio_locator_ids'],
+        )
+        # loss_mask here is w.r.t. the audio_batch['input_ids'] in conv_batch
+        # slice it to accommodate the audio_batch['tokens']
+        if loss_mask is not None:
+            loss_mask = loss_mask[:, :-1]
+
+        input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
+        new_all_encoded = []
+        last_encoded = []
+        all_encoder_pos = []
+        audio_cnt = 0
+        for idx, (cur_input_ids, cur_input_length) in enumerate(zip(input_ids, input_length)):
+            new_encoded = []
+            cur_input_ids = cur_input_ids[:cur_input_length]
+            total_encoded_len = 0
+            encoder_pos = []
+            start_pos, end_pos = -1, 0
+            for pos in range(cur_input_length - len(audio_locator_ids) + 1):
+                encoder_pos.append([start_pos, end_pos])
+                # enable xattn mask of pos to
+                if (cur_input_ids[pos : pos + len(audio_locator_ids)] == audio_locator_ids).all():
+                    new_encoded.append(encoded[audio_cnt, : encoded_len[audio_cnt]])
+                    start_pos, end_pos = total_encoded_len + 0, (total_encoded_len + encoded_len[audio_cnt])
+                    total_encoded_len += encoded_len[audio_cnt]
+                    audio_cnt += 1
+            last_encoded.append(new_encoded[-1])
+            new_encoded = torch.cat(new_encoded)
+            new_all_encoded.append(new_encoded)
+            all_encoder_pos.append(encoder_pos)
+
+        assert audio_cnt == len(encoded), (audio_cnt, len(encoded))
+
+        def get_packed_encoded(tensor_list):
+            stacked_encoded_len = torch.LongTensor([len(x) for x in tensor_list]).to(input_ids.device)
+            max_length = stacked_encoded_len.max().item()
+            stacked_encoded = torch.stack(
+                [torch.nn.functional.pad(f, (0, 0, 0, max_length - f.size(0))) for f in tensor_list]
+            )
+            return stacked_encoded, stacked_encoded_len
+
+        stacked_encoded, stacked_encoded_len = get_packed_encoded(new_all_encoded)
+        last_encoded, last_encoded_len = get_packed_encoded(last_encoded)
+
+        b, l, _ = input_embeds.shape
+        NEG_INF = -10000.0
+        # empty fixed feature for attention masking
+        stacked_encoded = torch.cat([stacked_encoded, torch.zeros_like(stacked_encoded[:, :1])], dim=1)
+        enc_dec_attn_mask = torch.zeros([b, l, stacked_encoded.shape[1]], device=input_length.device)
+        # TODO: do not support waitk masking because of missing assistant turn info
+        assert self.cfg.get("streaming", None) is None
+        for i in range(b):
+            for j in range(l):
+                if j < len(all_encoder_pos[i]):
+                    start_pos = all_encoder_pos[i][j][0]
+                    end_pos = all_encoder_pos[i][j][1]
+                if end_pos == 0:
+                    enc_dec_attn_mask[i, j, start_pos:] = 1
+                else:
+                    enc_dec_attn_mask[i, j, start_pos:end_pos] = 1
+        enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
+        enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
+
+        encoder_input, extra_outputs = self.perception_cross_attn(
+            stacked_encoded,
+            stacked_encoded_len,
+            input_embeds,
+            input_lengths=input_length,
+            return_mems=True,
+            enc_dec_attn_mask=enc_dec_attn_mask,
+        )
+        if 'alpha_xattn' in extra_outputs:
+            alpha_xattn = extra_outputs['alpha_xattn']
+            self.log(
+                'alpha_xattn',
+                alpha_xattn.mean(),
+                prog_bar=True,
+                batch_size=1,
+                rank_zero_only=True,
+            )
+        attention_mask = self._create_attention_mask(encoder_input)
+
+        if self.cfg.get('megatron_amp_O2', False):
+            base_module = self.model.module
+        else:
+            base_module = self.model
+        lm_embedding = (
+            base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
+        )
+        if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
+            encoder_input = encoder_input.transpose(0, 1).contiguous()
+        if self.cfg.get("sequence_parallel", False):
+            encoder_input = tensor_parallel.mappings.scatter_to_sequence_parallel_region(encoder_input)
+        if return_last_audio:
+            return encoder_input, attention_mask, labels, loss_mask, (last_encoded, last_encoded_len, extra_outputs)
+        else:
+            return (
+                encoder_input,
+                attention_mask,
+                labels,
+                loss_mask,
+                (stacked_encoded, stacked_encoded_len, extra_outputs),
+            )
+
     def setup_perception_modules(self, cfg):
         super().setup_perception_modules(cfg)
         imported_cls = model_utils.import_class_by_path(cfg.perception.xattn.target)

@@ -292,7 +292,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                 _,
                 (speech_encoded, speech_encoded_len, extra_outputs),
             ) = self.model.prepare_llm_input(batch, **strategy_args)
-            self.extra_outputs = {}
+            self.extra_outputs = {}  # TODO?
 
         if 'waitk_lagging' in strategy_args:
             speech_encoded_len = torch.minimum(
@@ -315,6 +315,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        audio_locator_ids: Optional[torch.Tensor] = None,
         **strategy_args,
     ):
         self.audio_signal = audio_signal[:]
@@ -322,7 +323,13 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         self.context_tokens = context_tokens[:]
         self.context_lengths = context_lengths[:]
 
-        return self.init_batch_per_step(1, **strategy_args)
+        if audio_locator_ids is None:
+            self.conv_decoding = False
+            return self.init_batch_per_step(1, **strategy_args)
+        else:
+            self.conv_decoding = True
+            self.audio_locator_ids = audio_locator_ids[:]
+            return self.init_batch_conv(context_tokens, context_lengths, audio_signal, audio_length, audio_locator_ids)
 
     def prepare_batch_at_step(
         self,
@@ -389,6 +396,50 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         batch = [tokens2use, embeddings2use, self.attention_mask, positions2use, setkey_value_array, len_array]
         tensor_shape = [tokens2use.shape[1], micro_batch_size, self.model.cfg.hidden_size]
         return batch, tensor_shape
+
+    def init_batch_conv(
+        self,
+        context_tokens: torch.Tensor,
+        context_lengths: torch.Tensor,
+        audio_signal: torch.Tensor,
+        audio_length: torch.Tensor,
+        audio_locator_ids: Optional[torch.Tensor] = None,
+        **strategy_args,
+    ):
+        # TODO: add the waitk decoding support, which means to do waitk on the last audio
+        assert strategy_args.get("waitk_lagging", None) is None
+        context_lengths = self.context_lengths
+        audio_length = self.audio_length
+        audio_signal = self.audio_signal[:]
+
+        batch = {
+            'audio_signal': audio_signal,
+            'audio_signal_length': audio_length,
+            'audio_locator_ids': audio_locator_ids,
+            'tokens': self.context_tokens,
+            'contexts': self.context_tokens,
+            'tokens_length': context_lengths,
+            'context_lengths': context_lengths,  # used by waitk
+            'labels': self.context_tokens,
+            'loss_mask': None,
+        }
+        (
+            encoder_input,
+            self.attention_mask,
+            context_tokens,
+            _,
+            (speech_encoded, speech_encoded_len, extra_outputs),
+        ) = self.model.prepare_llm_input_conv(
+            batch, return_last_audio=True, **strategy_args
+        )  # only attend to the last audio
+        self.extra_outputs = extra_outputs
+
+        self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
+        return (
+            context_tokens,
+            (encoder_input, speech_encoded, speech_encoded_len),
+            torch.zeros_like(context_lengths),
+        )
 
 
 def model_inference_strategy_dispatcher(model, **args):

@@ -177,6 +177,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             ]
             assert all(i[0] == audio_locator_tag[0][0] for i in audio_locator_tag)
             audio_locator_ids = torch.LongTensor(self.text_processor.tokenizer.text_to_ids(audio_locator_tag[0][0]))
+            assert (
+                len(audio_locator_ids) == 1
+            ), "audio_locator_tag must be a single token after tokenization to avoid tokenization discrepancies"
             ans["multimodal_conversation"] = {
                 "sample_ids": list(cuts.ids),
                 "audio_signal": audio,
