@@ -2036,7 +2036,7 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
         # loss_mask here is w.r.t. the audio_batch['input_ids'] in conv_batch
         # slice it to accommodate the audio_batch['tokens']
         if loss_mask is not None:
-            loss_mask = loss_mask[:, :-1]
+            loss_mask = loss_mask[:, 1:]
 
         input_embeds = self._get_text_embeddings(input_ids, None).transpose(0, 1)
         new_all_encoded = []
