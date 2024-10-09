@@ -1589,7 +1589,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 for k, v in m.items():
                     if k not in json_string:
                         json_string[k] = v
-                f_json.write(json.dumps(json_string) + '\n')
+                f_json.write(json.dumps(json_string, ensure_ascii=False) + '\n')
 
         logging.info(f'Predictions saved to {output_file_path}')
 
