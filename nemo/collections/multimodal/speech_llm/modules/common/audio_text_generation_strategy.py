@@ -19,6 +19,7 @@ import torch
 import nemo.collections.nlp.modules.common.text_generation_strategy as text_generation_strategy
 from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import shift_tokens_by_multi_audios
 from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids
+from nemo.utils import logging
 
 # the text representation of eos_id, it applies for all tokenizers
 END_OF_SEQ = '<|endoftext|>'
@@ -365,11 +366,16 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
             if decoder_mems_list is not None:
                 decoder_mems_list = decoder_mems_list[:, :, : curr_context_length - 1]
             if 'waitk_lagging' in strategy_args:
-                # for now only support sharing the same text context for a batch
-                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
-                (_, (_, cur_speech_encoded, cur_speech_encoded_len), _) = self.init_batch_per_step(
-                    step + 1, **strategy_args
-                )
+                if self.conv_decoding:
+                    logging.warning(f"TODO: implement waitk_lagging for conv decoding")
+                    cur_speech_encoded = speech_encoded
+                    cur_speech_encoded_len = speech_encoded_len
+                else:
+                    # for now only support sharing the same text context for a batch
+                    assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                    (_, (_, cur_speech_encoded, cur_speech_encoded_len), _) = self.init_batch_per_step(
+                        step + 1, **strategy_args
+                    )
             else:
                 cur_speech_encoded = speech_encoded
                 cur_speech_encoded_len = speech_encoded_len

@@ -2081,7 +2081,7 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
         stacked_encoded = torch.cat([stacked_encoded, torch.zeros_like(stacked_encoded[:, :1])], dim=1)
         enc_dec_attn_mask = torch.zeros([b, l, stacked_encoded.shape[1]], device=input_length.device)
         # TODO: do not support waitk masking because of missing assistant turn info
-        assert self.cfg.get("streaming", None) is None
+        # assert self.cfg.get("streaming", None) is None  # can train on streaming is with non-conversational data
         for i in range(b):
             for j in range(l):
                 if j < len(all_encoder_pos[i]):
