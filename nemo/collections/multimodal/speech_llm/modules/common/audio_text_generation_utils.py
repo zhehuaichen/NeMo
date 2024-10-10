@@ -586,7 +586,7 @@ def sample_sequence_batch(
                 logging.warning(f"--- token prediction step: {counter}")
                 logging.warning(f"current token_id: {tokens[0, context_length-1]}")
                 logging.warning(f"current token_text: {token_text}")
-            inference_strategy.token_alignatt.append([token_text, inference_strategy.cur_speech_encoded_len.item()])
+            inference_strategy.token_alignatt.append([token_text, inference_strategy.cur_speech_encoded_len.item() + int(strategy_args['right_context'])])
             
             batch, tensor_shape = inference_strategy.prepare_batch_at_step(
                 tokens,
