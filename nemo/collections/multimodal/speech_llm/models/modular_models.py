@@ -1464,13 +1464,15 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             labels_text = [remove_punctuations(l.lower(), data_cfg.get("punctuations", None)) for l in labels_text]
 
         strategy_args = self.get_inference_config()
-        if 'waitk_lagging' in strategy_args:
-            context_lengths = batch['context_lengths']
-            assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
-            predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
-            metadata = compute_waitk_lagging(
-                batch, predicted_token_ids, metadata, labels_text, strategy_args, self.tokenizer
-            )
+
+        if 'audio_locator_ids' not in batch:  # multimodal_convo_examples
+            if 'waitk_lagging' in strategy_args:
+                context_lengths = batch['context_lengths']
+                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
+                metadata = compute_waitk_lagging(
+                    batch, predicted_token_ids, metadata, labels_text, strategy_args, self.tokenizer
+                )
 
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
