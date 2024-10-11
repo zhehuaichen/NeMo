@@ -159,13 +159,14 @@ class MultiHeadAttention(nn.Module):
             whole layer, but before layer normalization
     """
 
-    def __init__(self, hidden_size, num_attention_heads, attn_score_dropout=0.0, attn_layer_dropout=0.0):
+    def __init__(self, hidden_size, num_attention_heads, attn_score_dropout=0.0, attn_layer_dropout=0.0, return_xatt_scores=False):
         super().__init__()
         if hidden_size % num_attention_heads != 0:
             raise ValueError(
                 "The hidden size (%d) is not a multiple of the number "
                 "of attention heads (%d)" % (hidden_size, num_attention_heads)
             )
+        self.return_xatt_scores = return_xatt_scores
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
         self.attn_head_size = int(hidden_size / num_attention_heads)
@@ -186,6 +187,10 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, queries, keys, values, attention_mask):
 
+        # logging.warning("**********"*10)
+        # logging.warning(f"queries.shape: {queries.shape}")
+        # logging.warning(f"keys.shape: {keys.shape}")
+        # logging.warning(f"values.shape: {values.shape}")
         # attention_mask is needed to hide the tokens which correspond to [PAD]
         # in the case of BERT, or to hide the future tokens in the case of
         # vanilla language modeling and translation
@@ -196,10 +201,21 @@ class MultiHeadAttention(nn.Module):
         key = self.transpose_for_scores(key) / self.attn_scale
         value = self.transpose_for_scores(value)
 
+        # logging.warning("**********"*10)
+        # logging.warning(f"query.shape: {query.shape}")
+        # logging.warning(f"key.shape: {key.shape}")
+        # logging.warning(f"value.shape: {value.shape}")
+
         # for numerical stability we pre-divide query and key by sqrt(sqrt(d))
         attention_scores = torch.matmul(query, key.transpose(-1, -2))
         if attention_mask is not None:
             attention_scores = attention_scores + attention_mask.to(attention_scores.dtype)
+        
+        # if self.return_xatt_scores:
+        #     logging.warning("**********"*5)
+        #     logging.warning(f"attention_scores.shape: {attention_scores.shape}")
+        #     # raise ValueError("Stop here")
+
         attention_probs = torch.softmax(attention_scores, dim=-1)
         attention_probs = self.attn_dropout(attention_probs)
 
@@ -211,7 +227,13 @@ class MultiHeadAttention(nn.Module):
         # output projection
         output_states = self.out_projection(context)
         output_states = self.layer_dropout(output_states)
-        return output_states
+        # logging.warning(f"output_states.shape: {output_states.shape}")
+        # raise ValueError("Stop here")
+        extra_output = {}
+        if self.return_xatt_scores:
+            extra_output['xatt_scores'] = attention_probs
+
+        return output_states, extra_output
 
 
 class PositionWiseFF(nn.Module):

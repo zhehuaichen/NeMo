@@ -488,7 +488,7 @@ class TransformerCrossAttention(NeuralModule, Exportable):
         with torch.autocast(device_type="cuda"):  # megatron_amp_O2 friendly
             enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
             dec_mask = lens_to_mask(input_lengths, input_embeds.shape[1]).to(input_lengths.dtype)
-            y = self.xattn_decoder(
+            y, xatt_scores_list = self.xattn_decoder(
                 decoder_states=self.input_proj1(input_embeds),
                 decoder_mask=dec_mask,
                 encoder_states=self.input_proj2(encoder_states),
@@ -503,6 +503,8 @@ class TransformerCrossAttention(NeuralModule, Exportable):
                 y = y[-1][:, -input_embeds.shape[1] :]
             else:
                 extra_outpus = {}
+            if xatt_scores_list:
+                extra_outpus['xatt_scores_list'] = xatt_scores_list
             y = self.output_proj(y) + input_embeds
             assert y.shape == input_embeds.shape
             return y, extra_outpus

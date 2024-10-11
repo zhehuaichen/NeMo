@@ -45,7 +45,7 @@ from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     MultiAudioPerceptionModule,
 )
 from nemo.collections.multimodal.speech_llm.parts.mixins.adapter_mixin import SpeechLLMAdapterMixin
-from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import compute_waitk_lagging, get_nested_dict_value
+from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import compute_waitk_lagging, get_nested_dict_value, compute_alignatt_lagging
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import MegatronGPTSFTModel
 from nemo.collections.nlp.modules.common.megatron.utils import (
@@ -1440,6 +1440,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             self.tokenizer.ids_to_text(t[l.item() :][: data_cfg.get('tokens_to_generate')])
             for t, l in zip(output['token_ids'], batch['context_lengths'])
         ]
+        pred_tokens_alignment = output['pred_tokens_alignment']
 
         if data_cfg.get("end_string", None):
             # sometimes data_cfg.end_string != self.tokenizer.ids_to_text(self.tokenizer.text_to_ids(data_cfg.end_string))
@@ -1473,6 +1474,12 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 metadata = compute_waitk_lagging(
                     batch, predicted_token_ids, metadata, labels_text, strategy_args, self.tokenizer
                 )
+            elif strategy_args['decode_policy'] == 'alignatt':
+                context_lengths = batch['context_lengths']
+                assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
+                predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
+                # logging.warning(f"predicted_token_ids: {predicted_token_ids}")  
+                metadata = compute_alignatt_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args,  self.tokenizer, pred_tokens_alignment)
 
         if data_cfg.get("log_every_n_steps", None) is not None:
             if batch_idx % data_cfg.log_every_n_steps == 0:
@@ -1780,7 +1787,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 for k, v in m.items():
                     if k not in json_string:
                         json_string[k] = v
-                f_json.write(json.dumps(json_string) + '\n')
+                f_json.write(json.dumps(json_string, ensure_ascii=False) + '\n')
 
         logging.info(f'Predictions saved to {output_file_path}')
 

@@ -58,7 +58,7 @@ class TransformerDecoderBlock(nn.Module):
         )
         self.layer_norm_2 = nn.LayerNorm(hidden_size, eps=1e-5)
         self.second_sub_layer = MultiHeadAttention(
-            hidden_size, num_attention_heads, attn_score_dropout, attn_layer_dropout
+            hidden_size, num_attention_heads, attn_score_dropout, attn_layer_dropout, return_xatt_scores=True,
         )
         self.layer_norm_3 = nn.LayerNorm(hidden_size, eps=1e-5)
         self.third_sub_layer = PositionWiseFF(hidden_size, inner_size, ffn_dropout, hidden_act)
@@ -71,12 +71,12 @@ class TransformerDecoderBlock(nn.Module):
         residual = decoder_query
         decoder_query = self.layer_norm_1(decoder_query)
         decoder_keys = self.layer_norm_1(decoder_keys)
-        self_attn_output = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
+        self_attn_output, _ = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
         self_attn_output += residual
 
         residual = self_attn_output
         self_attn_output = self.layer_norm_2(self_attn_output)
-        enc_dec_attn_output = self.second_sub_layer(self_attn_output, encoder_states, encoder_states, encoder_mask)
+        enc_dec_attn_output, extra_output = self.second_sub_layer(self_attn_output, encoder_states, encoder_states, encoder_mask)
         enc_dec_attn_output += residual
 
         residual = enc_dec_attn_output
@@ -84,7 +84,7 @@ class TransformerDecoderBlock(nn.Module):
         output_states = self.third_sub_layer(enc_dec_attn_output)
         output_states += residual
 
-        return output_states
+        return output_states, extra_output
 
     def forward_postln(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask):
         """
@@ -190,8 +190,11 @@ class TransformerDecoder(nn.Module):
         else:
             cached_mems_list = memory_states.unsqueeze(0)
 
+        xatt_scores_list = []
+
         for i, layer in enumerate(self.layers):
-            decoder_states = layer(decoder_states, decoder_attn_mask, memory_states, encoder_states, encoder_attn_mask)
+            decoder_states, extra_output = layer(decoder_states, decoder_attn_mask, memory_states, encoder_states, encoder_attn_mask)
+            xatt_scores_list.append(extra_output['xatt_scores'])
             memory_states = self._get_memory_states(decoder_states, decoder_mems_list, i + 1)
             if return_mems_as_list:
                 cached_mems_list.append(memory_states)
@@ -207,9 +210,9 @@ class TransformerDecoder(nn.Module):
                 cached_mems_list = torch.cat((cached_mems_list, memory_states.unsqueeze(0)), dim=0)
 
         if return_mems:
-            return cached_mems_list
+            return cached_mems_list, xatt_scores_list
         else:
-            return cached_mems_list[-1]
+            return cached_mems_list[-1], xatt_scores_list
 
     def input_example(self, max_batch=1, max_dim=256):
         """

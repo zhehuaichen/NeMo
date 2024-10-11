@@ -29,6 +29,8 @@ from nemo.collections.multimodal.speech_llm.modules.common.audio_text_generation
 from nemo.collections.nlp.modules.common.transformer.text_generation import OutputType
 from nemo.utils import AppState, logging
 
+from nemo.utils import logging
+
 try:
     from megatron.core import parallel_state, tensor_parallel
 
@@ -256,7 +258,7 @@ def synced_generate(
             **strategy_args,
         )
 
-    for tokens, lengths, output_logits, full_logits, audio_feat_lens in batch_token_iterator:
+    for tokens, lengths, output_logits, full_logits, audio_feat_lens, pred_tokens_alignment in batch_token_iterator:
         context_length += 1
     context_length += audio_feat_lens.min().item()
     if parallel_state.is_pipeline_last_stage():
@@ -299,7 +301,7 @@ def synced_generate(
                 )
                 torch.distributed.broadcast(full_logits, src, group)
     if tokens is not None:
-        return tokens[:, :context_length], output_logits, full_logits, audio_feat_lens
+        return tokens[:, :context_length], output_logits, full_logits, audio_feat_lens, pred_tokens_alignment
     return None
 
 
@@ -480,7 +482,7 @@ def generate(
     if hasattr(tokenizer, 'mask_token') and tokenizer.mask_token is not None:
         special_tokens.add(tokenizer.mask_token)
     if output is not None:
-        decode_tokens, output_logits, full_logits, audio_feat_lens = output
+        decode_tokens, output_logits, full_logits, audio_feat_lens, pred_tokens_alignment = output
         resp_sentences = []
         resp_sentences_seg = []
 
@@ -526,6 +528,7 @@ def generate(
         output['token_ids'] = decode_tokens
         output['offsets'] = all_offsets
         output['audio_feat_lens'] = audio_feat_lens
+        output['pred_tokens_alignment'] = pred_tokens_alignment
         output = inference_strategy.post_generation_process(output)
         return output
     return None
@@ -577,8 +580,14 @@ def sample_sequence_batch(
     ), 'activations_checkpoint_method should be None during inference. Disable it in the model config if restoring from nemo or in hparams.yaml if restoring from PTL checkpoint'
 
     tokenizer = model.tokenizer
+
+    inference_strategy.speech_chunk_step = 0
+    inference_strategy.token_alignatt = []
+
     # initialize the batch
     with torch.no_grad():
+
+        inference_strategy.pool2d = torch.nn.AvgPool2d(5, stride=1, padding=2, count_include_pad=False)
         context_tokens, input_embeddings, audio_feat_lens = inference_strategy.init_batch(
             context_tokens,
             context_lengths,
@@ -606,7 +615,16 @@ def sample_sequence_batch(
         maxlen = tokens_to_generate + audio_text_context_lengths.max().item()
         maxlen = inference_strategy.clip_max_len(maxlen)
         lengths = torch.ones([batch_size]).long().cuda() * maxlen
+
         while context_length < maxlen:
+
+            token_text = model.tokenizer.ids_to_tokens([tokens[0, context_length-1].item()])
+            if strategy_args["debug_mode"]:
+                logging.warning(f"--- token prediction step: {counter}")
+                logging.warning(f"current token_id: {tokens[0, context_length-1]}")
+                logging.warning(f"current token_text: {token_text}")
+            inference_strategy.token_alignatt.append([token_text, inference_strategy.cur_speech_encoded_len.item() + int(strategy_args['right_context'])])
+            
             batch, tensor_shape = inference_strategy.prepare_batch_at_step(
                 tokens,
                 input_embeddings,
@@ -662,6 +680,9 @@ def sample_sequence_batch(
                 # Clamp the predicted out of vocabulary tokens
                 prev = torch.clamp(prev, max=tokenizer.vocab_size - 1)
                 new_tokens = switch(tokens[:, context_length].view(-1), prev, started)
+                # logging.warning(f"tokens: {tokens}")
+                # logging.warning(f"new_tokens: {new_tokens}")
+                # logging.warning(f"context_length: {context_length}")
 
                 # Replace sampled tokens w/ done token if EOD has already been sampled
                 new_tokens = switch(new_tokens, eod_id, is_done)
@@ -712,11 +733,11 @@ def sample_sequence_batch(
                 torch.distributed.broadcast(done, src, group)
                 if compute_logprob:
                     if all_probs:
-                        yield tokens, lengths, output_logits, full_logits, audio_feat_lens
+                        yield tokens, lengths, output_logits, full_logits, audio_feat_lens, inference_strategy.token_alignatt
                     else:
-                        yield tokens, lengths, output_logits, None, audio_feat_lens
+                        yield tokens, lengths, output_logits, None, audio_feat_lens, inference_strategy.token_alignatt
                 else:
-                    yield tokens, lengths, None, None, audio_feat_lens
+                    yield tokens, lengths, None, None, audio_feat_lens, inference_strategy.token_alignatt
 
             else:
                 if parallel_state.is_pipeline_first_stage():
@@ -737,4 +758,6 @@ def sample_sequence_batch(
             context_length += 1
             counter += 1
             if done:
+                for item in inference_strategy.token_alignatt:
+                    logging.warning(f"{item[0][0]:<10} - {item[1]:<4}f - {item[1]*80} ms")
                 break

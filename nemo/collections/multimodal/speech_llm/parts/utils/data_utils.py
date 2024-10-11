@@ -237,6 +237,28 @@ def compute_waitk_lagging(
     return metadata
 
 
+def compute_alignatt_lagging(batch, predicted_token_ids, metadata, labels_text, strategy_args, tokenizer, pred_tokens_alignment, BOW_PREFIX = "\u2581"):
+    assert len(predicted_token_ids[0]) == len(pred_tokens_alignment) # sanity check for alignment length
+    target_length_word = [len(a.split()) for a in labels_text]
+    for i, tokens in enumerate(predicted_token_ids):
+        audio_signal_length = batch['audio_signal_length'][i] * 1000  # convert to ms
+        audio_signal_length = audio_signal_length // strategy_args.get('sample_rate', 16000)
+        audio_encoder_fs = strategy_args.get('audio_encoder_fs', 80)
+        # obtain lagging for alignatt
+        lagging = []
+        for cur_t, pred_idx in pred_tokens_alignment:
+            cur_t = cur_t[0]
+            eos_token = tokenizer.vocab[tokenizer.eos_id]
+            if (cur_t.startswith(BOW_PREFIX) and cur_t != BOW_PREFIX) or cur_t == eos_token:  # word boundary
+                lagging.append(pred_idx * audio_encoder_fs)
+            if cur_t == eos_token:
+                break
+        # logging.warning(f"lagging: {lagging}")
+        metadata[i]['LAAL'] = compute_laal(lagging, audio_signal_length, target_length_word[i]).tolist()
+        metadata[i]['AL'] = compute_al(lagging, audio_signal_length, target_length_word[i]).tolist()
+    return metadata
+
+
 def build_loss_mask(processed_example: dict, answer_only_loss: bool = True):
     """Pad input_ids in batch to max batch length while building loss mask"""
     # function copied from nemo/collections/nlp/data/language_modelling/megatron/gpt_sft_dataset.py
