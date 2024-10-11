@@ -256,7 +256,7 @@ def synced_generate(
             **strategy_args,
         )
 
-    for tokens, lengths, output_logits, full_logits, audio_feat_lens in batch_token_iterator:
+    for tokens, lengths, output_logits, full_logits, audio_feat_lens, pred_tokens_alignment in batch_token_iterator:
         context_length += 1
     context_length += audio_feat_lens.min().item()
     if parallel_state.is_pipeline_last_stage():
@@ -299,7 +299,7 @@ def synced_generate(
                 )
                 torch.distributed.broadcast(full_logits, src, group)
     if tokens is not None:
-        return tokens[:, :context_length], output_logits, full_logits, audio_feat_lens
+        return tokens[:, :context_length], output_logits, full_logits, audio_feat_lens, pred_tokens_alignment
     return None
 
 
@@ -449,7 +449,7 @@ def generate(
     if hasattr(tokenizer, 'mask_token') and tokenizer.mask_token is not None:
         special_tokens.add(tokenizer.mask_token)
     if output is not None:
-        decode_tokens, output_logits, full_logits, audio_feat_lens = output
+        decode_tokens, output_logits, full_logits, audio_feat_lens, pred_tokens_alignment = output
         resp_sentences = []
         resp_sentences_seg = []
 
@@ -495,6 +495,7 @@ def generate(
         output['token_ids'] = decode_tokens
         output['offsets'] = all_offsets
         output['audio_feat_lens'] = audio_feat_lens
+        output['pred_tokens_alignment'] = pred_tokens_alignment
         output = inference_strategy.post_generation_process(output)
         return output
     return None
@@ -696,11 +697,11 @@ def sample_sequence_batch(
                 torch.distributed.broadcast(done, src, group)
                 if compute_logprob:
                     if all_probs:
-                        yield tokens, lengths, output_logits, full_logits, audio_feat_lens
+                        yield tokens, lengths, output_logits, full_logits, audio_feat_lens, inference_strategy.token_alignatt
                     else:
-                        yield tokens, lengths, output_logits, None, audio_feat_lens
+                        yield tokens, lengths, output_logits, None, audio_feat_lens, inference_strategy.token_alignatt
                 else:
-                    yield tokens, lengths, None, None, audio_feat_lens
+                    yield tokens, lengths, None, None, audio_feat_lens, inference_strategy.token_alignatt
 
             else:
                 if parallel_state.is_pipeline_first_stage():
