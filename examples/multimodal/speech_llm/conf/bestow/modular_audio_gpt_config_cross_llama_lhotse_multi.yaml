@@ -284,6 +284,8 @@ model:
       drop_last: False
       context_key: ${model.data.train_ds.audio.context_key}
       end_string: ${model.data.end_string}
+      add_eos: True
+      add_bos: False
       write_predictions_to_file: False
       output_file_path_prefix: null # Prefix of the file to write predictions to.
       truncation_field: "context" # Options: ['context', 'answer']
