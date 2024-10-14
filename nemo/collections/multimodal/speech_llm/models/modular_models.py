@@ -1474,7 +1474,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 metadata = compute_waitk_lagging(
                     batch, predicted_token_ids, metadata, labels_text, strategy_args, self.tokenizer
                 )
-            elif strategy_args['decode_policy'] == 'alignatt':
+            elif strategy_args.get('decode_policy') == 'alignatt':
                 context_lengths = batch['context_lengths']
                 assert torch.equal(context_lengths, torch.ones_like(context_lengths) * context_lengths[0])
                 predicted_token_ids = [i[context_lengths[0].item() :] for i in output['token_ids']]
@@ -1669,6 +1669,10 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                             deduplicated_outputs['inputs'].append(input)
                             deduplicated_outputs['metadata'].append(metadata)
 
+            if 'LAAL' in deduplicated_outputs['metadata'][0]:
+                laal = [m['LAAL'] for m in deduplicated_outputs['metadata']]
+                laal = torch.tensor(laal).mean().item()
+                self.log('LAAL', laal, sync_dist=True, batch_size=1)
             # Compute metric score
             metric_name = self.val_metric_name if mode == 'validation' else self.test_metric_name
             metric_label_key = self.val_metric_label_key if mode == 'validation' else self.test_metric_label_key

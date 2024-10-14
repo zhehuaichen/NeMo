@@ -619,11 +619,11 @@ def sample_sequence_batch(
         while context_length < maxlen:
 
             token_text = model.tokenizer.ids_to_tokens([tokens[0, context_length-1].item()])
-            if strategy_args["debug_mode"]:
+            if strategy_args.get("debug_mode"):
                 logging.warning(f"--- token prediction step: {counter}")
                 logging.warning(f"current token_id: {tokens[0, context_length-1]}")
                 logging.warning(f"current token_text: {token_text}")
-            inference_strategy.token_alignatt.append([token_text, inference_strategy.cur_speech_encoded_len.item() + int(strategy_args['right_context'])])
+            inference_strategy.token_alignatt.append([token_text, inference_strategy.cur_speech_encoded_len.item() + int(strategy_args.get('right_context', 13))])
             
             batch, tensor_shape = inference_strategy.prepare_batch_at_step(
                 tokens,
