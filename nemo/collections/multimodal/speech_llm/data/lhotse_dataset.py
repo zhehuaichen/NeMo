@@ -148,9 +148,11 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     ans.context_ids = ans.context_ids[: -min(truncation_length, len(ans.context_ids))]
             # add eos
             eos_id = self.text_processor.tokenizer.eos_id
-            ans.input_ids = torch.cat([ans.input_ids, torch.tensor([eos_id])])
+            bos_id = self.text_processor.tokenizer.bos_id
+            ans.context_ids = torch.cat([torch.tensor([bos_id]), ans.context_ids])
+            ans.input_ids = torch.cat([torch.tensor([bos_id]), ans.input_ids, torch.tensor([eos_id])])
             ans.answer_ids = torch.cat([ans.answer_ids, torch.tensor([eos_id])])
-            ans.mask = torch.cat([ans.mask, torch.tensor([1])])
+            ans.mask = torch.cat([torch.tensor([0]), ans.mask, torch.tensor([1])])
 
         multimodal_convo_examples = all_cuts.filter(lambda c: isinstance(c, NeMoMultimodalConversation))
         if multimodal_convo_examples:
