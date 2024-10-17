@@ -502,22 +502,22 @@ class PromptFormatterTextProcessing:
                 context_start_idx = (ans["context_ids"] == self.audio_locator_id).nonzero().flatten()
             else:  # slow case, no dedicated token, got tokenized into multiple tokens; substring search
                 context_start_idx = _find_substring_indices(ans["context_ids"], self.audio_locator_id)
-        bos_id = self.tokenizer.bos_id
-        eos_id = self.tokenizer.eos_id
-        ans["answer_ids"] = torch.Tensor(ans["answer_ids"].tolist() + [eos_id]).long()
-        ans["context_ids"] = torch.Tensor([bos_id] + ans["context_ids"].tolist()).long()
-        ans["input_ids"] = torch.Tensor([bos_id] + ans["input_ids"].tolist() + [eos_id]).long()
-        if len(ans["input_ids"]) > self.max_seq_length:
-            truncation_length = len(ans["input_ids"]) - self.max_seq_length
-            logging.warning(
-                f'Input ids length {len(ans["input_ids"])} exceed max sequence length {self.max_seq_length}'
-            )
-            ans["input_ids"] = ans["input_ids"][: self.max_seq_length]
+        max_seq_length = self.max_seq_length - 2  # reserve for bos and eos
+        if len(ans["input_ids"]) > max_seq_length:
+            truncation_length = len(ans["input_ids"]) - max_seq_length
+            logging.warning(f'Input ids length {len(ans["input_ids"])} exceed max sequence length {max_seq_length}')
+            ans["input_ids"] = ans["input_ids"][:max_seq_length]
             if truncation_length < len(ans["answer_ids"]):
                 ans["answer_ids"] = ans["answer_ids"][:-truncation_length]
             else:
                 ans["answer_ids"] = ans["answer_ids"][: -min(truncation_length, len(ans["answer_ids"]))]
                 ans["context_ids"] = ans["context_ids"][: -min(truncation_length, len(ans["context_ids"]))]
+        bos_id = self.tokenizer.bos_id
+        eos_id = self.tokenizer.eos_id
+        ans["answer_ids"] = torch.Tensor(ans["answer_ids"].tolist() + [eos_id]).long()
+        ans["context_ids"] = torch.Tensor([bos_id] + ans["context_ids"].tolist()).long()
+        ans["input_ids"] = torch.Tensor([bos_id] + ans["input_ids"].tolist() + [eos_id]).long()
+
         return {
             'input_ids': ans["input_ids"],
             'answer_start_idx': len(ans["context_ids"]),
