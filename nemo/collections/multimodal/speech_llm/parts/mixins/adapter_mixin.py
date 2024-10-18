@@ -80,7 +80,7 @@ class SpeechLLMAdapterMixin(NLPAdapterModelMixin):
                     logging.warning(f"Key {i} not found in state_dict, trying {i_no_model}")
                     state_dict[i] = state_dict[i_no_model]
                     del state_dict[i_no_model]
-
+        state_dict = {replace_prefix(k, 'model.model.decoder.', 'model.decoder.'): v for k, v in state_dict.items()}
         super(MegatronGPTModel, self).load_state_dict(state_dict, strict=False)
         state_dict = state_dict
 
@@ -90,5 +90,9 @@ class SpeechLLMAdapterMixin(NLPAdapterModelMixin):
         Add prefix "model." to the keys.
         """
         peft_state_dict = super().get_peft_state_dict()
-        peft_state_dict_with_prefix = {"model." + k: v for k, v in peft_state_dict.items()}
+        peft_state_dict_with_prefix = {}
+        for k, v in peft_state_dict.items():
+            if "model." not in k:
+                k = "model." + k
+            peft_state_dict_with_prefix[k] = v
         return peft_state_dict_with_prefix
