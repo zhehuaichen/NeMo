@@ -153,8 +153,6 @@ def read_dataset_config(config) -> tuple[CutSet, bool]:
         # Resolve /path/to/input_cfg.yaml into config contents if needed.
         input_cfg = OmegaConf.load(input_cfg)
     cuts, is_tarred = parse_and_combine_datasets(input_cfg, propagate_attrs=propagate_attrs)
-    if config.get("force_finite", False):
-        is_tarred = False
     return cuts, is_tarred
 
 
