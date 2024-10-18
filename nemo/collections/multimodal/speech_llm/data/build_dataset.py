@@ -69,6 +69,7 @@ def build_speechllm_dataset(model_instance, data_cfg, is_train):
             max_seq_length=data_cfg["max_seq_length"],
             context_key=data_cfg.get('context_key', "context"),
             default_context_key=data_cfg.get('default_context_key', "default_context"),
+            convert_to_conv_by_inject_str=data_cfg.get('convert_to_conv_by_inject_str', None),
         )
 
     # Notably, the data weights are controlled by either bucketing_weights

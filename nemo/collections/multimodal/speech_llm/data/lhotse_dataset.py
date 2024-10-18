@@ -61,6 +61,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         max_seq_length: int,
         context_key: str = "context",
         default_context_key: str = "default_context",
+        convert_to_conv_by_inject_str: Optional[str] = None,
     ):
         super().__init__()
         self.text_processor = text_processor
@@ -72,6 +73,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         self.default_context = default_context
         self.context_key = context_key
         self.default_context_key = default_context_key
+        self.convert_to_conv_by_inject_str = convert_to_conv_by_inject_str
 
     def __getitem__(self, all_cuts: CutSet) -> dict[str, torch.Tensor | list[str] | dict]:
         ans = {}
@@ -92,6 +94,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     cut.context = getattr(cut, self.default_context_key)
                 else:
                     cut.context = self.default_context
+            if self.convert_to_conv_by_inject_str is not None:
+                cut.context += ' ' + self.convert_to_conv_by_inject_str
 
             metadata = []
             for id, cut in enumerate(cuts):
@@ -116,6 +120,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 }
             )
             ans.update(return_batch)
+            if self.convert_to_conv_by_inject_str is not None:
+                audio_locator_ids = torch.LongTensor(
+                    self.text_processor.tokenizer.text_to_ids(self.convert_to_conv_by_inject_str)
+                )
+                ans['audio_locator_ids'] = audio_locator_ids
+                ans['loss_mask'] = torch.cat([0 * ans['loss_mask'][:, :1], ans['loss_mask']], dim=1)
+                ans = {'multimodal_conversation': ans}
 
         # convert text examples to tensors
         text_examples = all_cuts.filter(lambda c: isinstance(c, (SourceTargetTextExample, NeMoSFTExample)))
@@ -149,6 +160,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         multimodal_convo_examples = all_cuts.filter(lambda c: isinstance(c, NeMoMultimodalConversation))
         if multimodal_convo_examples:
+            assert (
+                "multimodal_conversation" not in ans
+            ), "cannot mix vanilla and multimodal_conversation when using convert_to_conv_by_inject_str."
             audio_turn_cuts = []
             formatted_chats = {'input_ids': [], 'context_ids': [], 'answer_ids': [], 'mask': []}
             for example in multimodal_convo_examples:
@@ -251,6 +265,8 @@ def collate_text_data(
     assert input_id_maxlen <= max_seq_length, f"{input_id_maxlen=} <= {max_seq_length=}"
 
     return {
+        "input_ids": all_tokens,
+        "input_id_lengths": full_lengths,
         "tokens": all_tokens[:, :-1],
         "tokens_length": full_lengths - 1,
         "labels": all_tokens[:, 1:],
