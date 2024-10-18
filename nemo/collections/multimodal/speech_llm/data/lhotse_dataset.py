@@ -133,7 +133,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             ans.update(text_minibatch)
 
         def post_process_seq(ans):
-            max_seq_length = self.max_seq_length - 2  # reserve for eos and bos
+            max_seq_length = self.max_seq_length
             if len(ans.input_ids) > max_seq_length:
                 truncation_length = len(ans.input_ids) - max_seq_length
                 ans.input_ids = ans.input_ids[:max_seq_length]
@@ -146,13 +146,6 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     )
                     ans.answer_ids = ans.answer_ids[: -min(truncation_length, len(ans.answer_ids))]
                     ans.context_ids = ans.context_ids[: -min(truncation_length, len(ans.context_ids))]
-            # add bos and eos
-            eos_id = self.text_processor.tokenizer.eos_id
-            bos_id = self.text_processor.tokenizer.bos_id
-            ans.context_ids = torch.cat([torch.tensor([bos_id]), ans.context_ids])
-            ans.input_ids = torch.cat([torch.tensor([bos_id]), ans.input_ids, torch.tensor([eos_id])])
-            ans.answer_ids = torch.cat([ans.answer_ids, torch.tensor([eos_id])])
-            ans.mask = torch.cat([torch.tensor([0]), ans.mask, torch.tensor([1])])
 
         multimodal_convo_examples = all_cuts.filter(lambda c: isinstance(c, NeMoMultimodalConversation))
         if multimodal_convo_examples:
