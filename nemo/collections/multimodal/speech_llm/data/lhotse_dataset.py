@@ -62,6 +62,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         context_key: str = "context",
         default_context_key: str = "default_context",
         convert_to_conv_by_inject_str: Optional[str] = None,
+        convert_to_conv_by_inject_str_the_end: bool = False,
     ):
         super().__init__()
         self.text_processor = text_processor
@@ -74,6 +75,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         self.context_key = context_key
         self.default_context_key = default_context_key
         self.convert_to_conv_by_inject_str = convert_to_conv_by_inject_str
+        self.convert_to_conv_by_inject_str_the_end = convert_to_conv_by_inject_str_the_end
 
     def __getitem__(self, all_cuts: CutSet) -> dict[str, torch.Tensor | list[str] | dict]:
         ans = {}
@@ -85,6 +87,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
             return_batch = {}
             audio_ratio = [1.0] * len(cuts)
+            new_cuts = []
             for _, cut in enumerate(cuts):
                 if isinstance(cut, MixedCut):
                     cut = cut.first_non_padding_cut
@@ -94,8 +97,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     cut.context = getattr(cut, self.default_context_key)
                 else:
                     cut.context = self.default_context
-            if self.convert_to_conv_by_inject_str is not None:
-                cut.context += ' ' + self.convert_to_conv_by_inject_str
+                if self.convert_to_conv_by_inject_str is not None:
+                    if self.convert_to_conv_by_inject_str_the_end:
+                        cut.context = cut.context + ' ' + self.convert_to_conv_by_inject_str
+                    else:
+                        cut.context = self.convert_to_conv_by_inject_str + ' ' + cut.context
+                new_cuts.append(cut)
+            cuts = CutSet(new_cuts)
 
             metadata = []
             for id, cut in enumerate(cuts):
