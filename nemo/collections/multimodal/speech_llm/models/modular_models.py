@@ -2089,10 +2089,18 @@ class CrossAttendModularAudioGPTModel(ModularAudioGPTModel):
                 if j < len(all_encoder_pos[i]):
                     start_pos = all_encoder_pos[i][j][0]
                     end_pos = all_encoder_pos[i][j][1]
-                if end_pos == 0:
+                # don't apply the mask in the inference time for simplicity
+                if (
+                    self.cfg.get("exclude_xattn_on_context", False)
+                    and loss_mask is not None
+                    and loss_mask[i, j + 1] == 0
+                ):
+                    enc_dec_attn_mask[i, j, -1] = 1
+                elif end_pos == 0:
                     enc_dec_attn_mask[i, j, start_pos:] = 1
                 else:
                     enc_dec_attn_mask[i, j, start_pos:end_pos] = 1
+
         enc_dec_attn_mask = (1 - enc_dec_attn_mask) * NEG_INF
         enc_dec_attn_mask = enc_dec_attn_mask.unsqueeze(1)
 
