@@ -266,7 +266,24 @@ model:
         shuffle_buffer_size: ${model.data.train_ds.audio.shuffle_buffer_size}
         num_workers: ${model.data.train_ds.audio.num_workers}
         shuffle: true
-      audio2: ${model.data.train_ds.audio}
+      audio2:
+        input_cfg: ${model.data.train_ds.audio.input_cfg}
+        seed: ${model.data.train_ds.audio.seed}
+        shard_seed: ${model.data.train_ds.audio.shard_seed}
+        batch_size: ${model.data.train_ds.audio.batch_size}
+        batch_duration: ${model.data.train_ds.audio.batch_duration}
+        quadratic_duration: ${model.data.train_ds.audio.quadratic_duration}
+        use_bucketing: ${model.data.train_ds.audio.use_bucketing}
+        num_buckets: ${model.data.train_ds.audio.num_buckets}
+        bucket_duration_bins: ${model.data.train_ds.audio.bucket_duration_bins}
+        bucket_buffer_size: ${model.data.train_ds.audio.bucket_buffer_size}
+        num_workers: ${model.data.train_ds.audio.num_workers}
+        shuffle: ${model.data.train_ds.audio.shuffle}
+        shuffle_buffer_size: ${model.data.train_ds.audio.shuffle_buffer_size}
+        text_field: ${model.data.train_ds.audio.text_field}
+        pin_memory: ${model.data.train_ds.audio.pin_memory}
+        max_duration: ${model.data.train_ds.audio.max_duration}
+        min_duration: ${model.data.train_ds.audio.min_duration}
 
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
