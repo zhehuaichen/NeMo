@@ -712,11 +712,17 @@ def sample_sequence_batch(
                 torch.distributed.broadcast(done, src, group)
                 if compute_logprob:
                     if all_probs:
-                        yield tokens, lengths, output_logits, full_logits, audio_feat_lens
+                        yield tokens[
+                            :, inference_strategy.model.last_extra_context_lengths :
+                        ], lengths, output_logits, full_logits, audio_feat_lens
                     else:
-                        yield tokens, lengths, output_logits, None, audio_feat_lens
+                        yield tokens[
+                            :, inference_strategy.model.last_extra_context_lengths :
+                        ], lengths, output_logits, None, audio_feat_lens
                 else:
-                    yield tokens, lengths, None, None, audio_feat_lens
+                    yield tokens[
+                        :, inference_strategy.model.last_extra_context_lengths :
+                    ], lengths, None, None, audio_feat_lens
 
             else:
                 if parallel_state.is_pipeline_first_stage():
@@ -725,7 +731,9 @@ def sample_sequence_batch(
                     new_tokens = torch.empty_like(tokens[:, context_length])
                     torch.distributed.broadcast(new_tokens, src, group)
                     tokens[:, context_length] = new_tokens
-                    yield tokens, None, None, None, audio_feat_lens
+                    yield tokens[
+                        :, inference_strategy.model.last_extra_context_lengths :
+                    ], None, None, None, audio_feat_lens
                 else:
                     yield None, None, None, None, audio_feat_lens
 

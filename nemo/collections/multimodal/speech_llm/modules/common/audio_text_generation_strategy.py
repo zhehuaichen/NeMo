@@ -52,6 +52,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
             processed_signal=None,
             processed_signal_length=None,
         )
+        self.model.last_extra_context_lengths = 0
 
         # Move to GPU.
         if audio_locator_ids is not None:
@@ -300,6 +301,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                     logging.info(
                         f"Grow the context_lengths to {context_lengths} by adding {self.model.token_length} from previous turns.\nNew context_tokens: {self.model.tokenizer.ids_to_text(self.context_tokens[0].tolist())}"
                     )
+                    self.model.last_extra_context_lengths = self.model.token_length
                 if self.model.megatron_amp_O2:
                     base_module = self.model.model.module
                 else:
@@ -364,6 +366,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         self.audio_length = audio_length[:]
         self.context_tokens = context_tokens[:]
         self.context_lengths = context_lengths[:]
+        self.model.last_extra_context_lengths = 0
 
         if audio_locator_ids is None:
             self.conv_decoding = False
