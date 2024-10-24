@@ -698,7 +698,7 @@ def sample_sequence_batch(
 
                 #                done_token = (prev == eod_id).byte() & started.byte()
                 done_token = inference_strategy.end_of_generation_condition(
-                    tokens[:, : context_length + 1], prev, eod_id, end_strings
+                    tokens[:, : context_length + 1], prev, eod_id, end_strings, batch
                 )
                 done_token = done_token.byte() & started.byte()
 
