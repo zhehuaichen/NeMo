@@ -32,6 +32,54 @@ def switch(val1, val2, boolean):
 
 
 class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerationStrategy):
+    def reset_multiturn_cache(self):
+        if (
+            hasattr(self.model, "token_length")
+            and hasattr(self.model, "tokens")
+            and hasattr(self.model, "input_embeddings")
+        ):
+            del self.model.tokens
+            del self.model.input_embeddings
+            del self.model.token_length
+
+    def end_of_generation_condition(
+        self, tokens: torch.Tensor, prev: torch.Tensor, eod_id: int, end_strings: List[str], batch
+    ) -> torch.Tensor:
+        input_embeddings = batch[1].transpose(0, 1)
+        if hasattr(self.model, "input_embeddings"):
+            self.model.input_embeddings = torch.cat([self.model.input_embeddings, input_embeddings], dim=1)
+        else:
+            self.model.input_embeddings = input_embeddings
+        self.model.tokens = tokens[:, :-1]  # remove eos
+        self.model.token_length = self.model.tokens.shape[1]
+        assert self.model.input_embeddings.shape[1] == self.model.token_length
+
+        # the following is the legacy end_of_generation_condition
+        if len(end_strings) == 1 and end_strings[0] == END_OF_SEQ:
+            return prev == eod_id
+        else:
+            tokenizer = self.model.tokenizer
+            conditions = []
+            end_tokens = set()
+            end_tokens.add(eod_id)
+            for end_string in end_strings:
+                if len(end_string) > 1:
+                    continue
+                ids_1 = tokenizer.text_to_ids(f'<extra_id_1>{end_string}')
+                ids_2 = tokenizer.text_to_ids('<extra_id_1>')
+                if len(ids_1) <= len(ids_2):
+                    continue
+                token_id = ids_1[len(ids_2) :][0]
+
+                end_tokens.add(token_id)
+
+            for p, token_item in zip(prev, tokens):
+                text = tokenizer.ids_to_text(token_item.tolist())
+                conditions.append(
+                    any([text.endswith(end_string) for end_string in end_strings] + [p.item() in end_tokens])
+                )
+            return torch.tensor(conditions, dtype=torch.bool, device=tokens.device)
+
     def init_batch(
         self,
         context_tokens: torch.Tensor,
@@ -52,6 +100,7 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
             processed_signal=None,
             processed_signal_length=None,
         )
+        self.model.last_extra_context_lengths = 0
 
         # Move to GPU.
         if audio_locator_ids is not None:
@@ -76,6 +125,24 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
             labels = torch.nn.functional.pad(
                 labels, (0, tokens_to_generate), value=self.model.tokenizer.pad_id
             )  # (B, T)
+
+            if (
+                hasattr(self.model, "token_length")
+                and hasattr(self.model, "tokens")
+                and hasattr(self.model, "input_embeddings")
+            ):
+                encoder_input = torch.cat(
+                    [self.model.input_embeddings[:, : self.model.token_length].transpose(0, 1), encoder_input], dim=0
+                )
+                del self.model.input_embeddings
+                labels = torch.cat([self.model.tokens[:, : self.model.token_length], labels], dim=1)
+                context_lengths += self.model.token_length
+                encoder_length += self.model.token_length
+                # TODO: remove the following logging
+                logging.info(
+                    f"Grow the context_lengths to {context_lengths} by adding {self.model.token_length} from previous turns.\nNew context_tokens: {self.model.tokenizer.ids_to_text(labels.tolist())}"
+                )
+                self.model.last_extra_context_lengths = self.model.token_length
 
             self.attention_mask = self.model._create_attention_mask(encoder_input.transpose(0, 1))
             self.position_ids = build_position_ids(encoder_input[:, :, 0].transpose(0, 1))
@@ -105,6 +172,12 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
                 new_context_tokens = self.model._shift_labels_by_emb_len(
                     context_tokens, context_lengths, audio_feat_lens, encoder_max_length, pad_token=0
                 )
+            if (
+                hasattr(self.model, "token_length")
+                and hasattr(self.model, "tokens")
+                and hasattr(self.model, "input_embeddings")
+            ):
+                raise NotImplementedError("Multiturn decoding only implemented for conv decoding")
 
             return new_context_tokens, encoder_input, audio_feat_lens
 
@@ -159,44 +232,6 @@ class AudioToTextGenerationStrategy(text_generation_strategy.GPTModelTextGenerat
         At the end of the inference, post process the inference results
         """
         pass
-
-    def end_of_generation_condition(
-        self, tokens: torch.Tensor, prev: torch.Tensor, eod_id: int, end_strings: List[str]
-    ) -> torch.Tensor:
-        """
-        return whether the generation should stop based on the previous token
-        Args:
-            tokens (torch.Tensor): the generated tokens so far
-            prev  (torch.Tensor): the previous token
-            eod_id (int): the end of document token id
-            end_strings (List[str]): the list of end of generation strings
-        returns:
-            a boolean tensor indicating whether the generation should stop
-        """
-        if len(end_strings) == 1 and end_strings[0] == END_OF_SEQ:
-            return prev == eod_id
-        else:
-            tokenizer = self.model.tokenizer
-            conditions = []
-            end_tokens = set()
-            end_tokens.add(eod_id)
-            for end_string in end_strings:
-                if len(end_string) > 1:
-                    continue
-                ids_1 = tokenizer.text_to_ids(f'<extra_id_1>{end_string}')
-                ids_2 = tokenizer.text_to_ids('<extra_id_1>')
-                if len(ids_1) <= len(ids_2):
-                    continue
-                token_id = ids_1[len(ids_2) :][0]
-
-                end_tokens.add(token_id)
-
-            for p, token_item in zip(prev, tokens):
-                text = tokenizer.ids_to_text(token_item.tolist())
-                conditions.append(
-                    any([text.endswith(end_string) for end_string in end_strings] + [p.item() in end_tokens])
-                )
-            return torch.tensor(conditions, dtype=torch.bool, device=tokens.device)
 
 
 class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
@@ -259,6 +294,25 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
                     decoder_mems_list=decoder_mems_list,
                 )
                 encoder_input = torch.cat([encoder_input_prev, encoder_input, input_embeds[:, context_length:]], dim=1)
+                # handle the cache for previous turns
+                if (
+                    hasattr(self.model, "token_length")
+                    and hasattr(self.model, "tokens")
+                    and hasattr(self.model, "input_embeddings")
+                ):
+                    encoder_input = torch.cat(
+                        [self.model.input_embeddings[:, : self.model.token_length], encoder_input], dim=1
+                    )
+                    del self.model.input_embeddings
+                    self.context_tokens = torch.cat(
+                        [self.model.tokens[:, : self.model.token_length], self.context_tokens], dim=1
+                    )
+                    context_lengths += self.model.token_length
+                    # TODO: remove the following logging
+                    logging.info(
+                        f"Grow the context_lengths to {context_lengths} by adding {self.model.token_length} from previous turns.\nNew context_tokens: {self.model.tokenizer.ids_to_text(self.context_tokens[0].tolist())}"
+                    )
+                    self.model.last_extra_context_lengths = self.model.token_length
                 if self.model.megatron_amp_O2:
                     base_module = self.model.model.module
                 else:
@@ -323,6 +377,7 @@ class CrossAttendAudioToTextGenerationStrategy(AudioToTextGenerationStrategy):
         self.audio_length = audio_length[:]
         self.context_tokens = context_tokens[:]
         self.context_lengths = context_lengths[:]
+        self.model.last_extra_context_lengths = 0
 
         if audio_locator_ids is None:
             self.conv_decoding = False
