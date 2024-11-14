@@ -110,6 +110,8 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         # handle the case where the batch size from dynamic bucketting is not divisible in lhotse
         self.enforce_divisible_batch = False
         self.setup_perception_modules(cfg)
+        self.extract_codec_on_the_fly = cfg.get('extract_codec_on_the_fly', False)
+        self.codec_model_downsampling_factor = cfg.get('codec_model_downsampling_factor', 1023.5)
 
         # print out params in more details
         self.summarize(max_depth=2)
@@ -335,6 +337,29 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             text_embeddings = text_embeddings + position_embeddings
         return text_embeddings.transpose(0, 1)
 
+    def _get_codec_embeddings(self, audio_signal, audio_signal_length):
+        """Get codec embeddings for the input audio signal."""
+        if 'codec_model' not in self.additional_models:
+            self.additional_models['codec_model'] = self.codec_model
+            self.additional_models['codec_model'].to(self.device)
+            self.additional_models['codec_model'].eval()
+        codec_model = self.additional_models['codec_model']
+        codec_model.eval()
+        with torch.no_grad():
+            original_codec_codes, _ = codec_model.encode(audio=audio_signal, audio_len=audio_signal_length)
+            original_codec_codes = original_codec_codes.transpose(1, 2)
+        out_codec_codes = []
+        out_codec_lens = []
+        for sidx in range(audio_signal.shape[0]):
+            codec_len = min(
+                torch.ceil(audio_signal_length[sidx] / self.codec_model_downsampling_factor).int().to(self.device),
+                original_codec_codes[sidx].shape[0]
+            )
+            out_codec_codes.append(original_codec_codes[sidx][:codec_len].to(self.device))
+            out_codec_lens.append(codec_len)
+
+        return out_codec_codes, out_codec_lens
+
     def prepare_llm_input(self, audio_batch):
         """Prepare input for the LLM."""
         input_signal = audio_batch['audio_signal']
@@ -346,6 +371,17 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             audio_batch['labels'],
             audio_batch['loss_mask'],
         )
+
+        if self.extract_codec_on_the_fly:
+            answer_signal = audio_batch['answer_audio']
+            answer_signal_length = audio_batch['answer_audio_lens']
+            target_text_lengths = audio_batch['target_text_lengths']
+
+            answer_codecs, answer_codecs_lens = self._get_codec_embeddings(answer_signal, answer_signal_length) # list, list
+            for i, answer_codec in enumerate(answer_codecs):
+                input_ids[i, target_text_lengths[i] + 1: target_text_lengths[i] + 1 + answer_codecs_lens[i], 1:] = answer_codec
+                labels[i, target_text_lengths[i]: target_text_lengths[i] + answer_codecs_lens[i], 1:] = answer_codec
+            
 
         num_audios = audio_batch.get("num_audios", None)
         context_start_idx = audio_batch.get("context_start_idx", None)
@@ -893,6 +929,47 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             return audio_model, audio_model.cfg
 
     @classmethod
+    def get_codec_models_and_configs(cls, cfg):
+        pretrained_codec_model = cfg.model.get("codec_model_path", None)
+        pretrained_codec_model_class = cfg.model.get(
+            "pretrained_codec_model_target", "nemo.collections.tts.models.audio_codec.AudioCodecModel"
+        )
+
+        model_class = hydra.utils.get_class(pretrained_codec_model_class)
+        if pretrained_codec_model.endswith('.nemo'):
+            logging.info(f'Loading pretrained codec model from local file: {pretrained_codec_model}')
+            codec_model = model_class.restore_from(pretrained_codec_model, map_location='cpu')
+        else:
+            logging.info(f'Loading pretrained codec model from NGC: {pretrained_codec_model}')
+            codec_model = model_class.from_pretrained(pretrained_codec_model, map_location='cpu')
+        return codec_model, codec_model.cfg
+
+    @classmethod
+    def get_asr_models_and_configs(cls, cfg):
+
+        pretrained_asr_model = cfg.model.get("asr_model_path", None)
+        pretrained_asr_model_class = cfg.model.get(
+            "pretrained_asr_model_target", "nemo.collections.asr.models.ASRModel"
+        )
+
+        model_class = hydra.utils.get_class(pretrained_asr_model_class)
+        if pretrained_asr_model.endswith('.nemo'):
+            logging.info(f'Loading pretrained codec model from local file: {pretrained_asr_model}')
+            asr_model = model_class.restore_from(pretrained_asr_model, map_location='cpu')
+        else:
+            logging.info(f'Loading pretrained asr model from NGC: {pretrained_asr_model}')
+            asr_model = model_class.from_pretrained(pretrained_asr_model, map_location='cpu')
+        return asr_model, asr_model.cfg
+
+    @classmethod
+    def get_mos_models_and_configs(cls, cfg):
+        import torchaudio
+        from torchaudio.pipelines import SQUIM_SUBJECTIVE
+
+        squim_mos_model = SQUIM_SUBJECTIVE.get_model()
+        return squim_mos_model
+
+    @classmethod
     def load_pretrained_audio_weights(
         cls, cfg, model, audio_model, speaker_model: Optional[EncDecSpeakerLabelModel] = None
     ):
@@ -945,6 +1022,16 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
 
         base_model_cfg = MegatronGPTSFTModel.merge_cfg_with(cfg.model.restore_from_path, cfg)
         audio_model, audio_model_cfg = cls.get_audio_encoder_models_and_configs(cfg)
+
+        codec_model, codec_model_cfg = cls.get_codec_models_and_configs(cfg)
+        logging.info(f"Loaded Codec Model: {codec_model}")
+
+        asr_model, asr_model_cfg = cls.get_asr_models_and_configs(cfg)
+        logging.info(f"Loaded ASR Model: {asr_model}")
+
+        mos_model = cls.get_mos_models_and_configs(cfg)
+        logging.info(f"Loaded MOS Model: {mos_model}")
+
         speaker_model, speaker_cfg = cls.get_speaker_model_and_config(cfg)
         model_cfg = cls._modify_config(
             base_model_cfg, cfg, audio_model_cfg, add_cfg_to_tree=False, speaker_cfg=speaker_cfg
@@ -981,7 +1068,11 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         if 'inference' in cfg:
             inference_cfg = OmegaConf.to_container(cfg.inference, resolve=True)
             model.set_inference_config(inference_cfg)
-        return model
+
+        cls.codec_model = codec_model
+        cls.asr_model = asr_model
+        cls.mos_model = mos_model
+        return model, codec_model, asr_model, mos_model
 
     @classmethod
     def load_audio_encoder_for_inference(cls, cfg: DictConfig, model_cfg: DictConfig, model: ModelPT) -> ModelPT:
