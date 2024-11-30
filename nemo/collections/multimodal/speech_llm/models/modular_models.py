@@ -39,7 +39,10 @@ from nemo.collections.multimodal.speech_llm.data.build_dataset import (
     build_speechllm_dataloader,
     build_speechllm_dataset,
 )
-from nemo.collections.multimodal.speech_llm.modules.common.audio_text_generation_utils import generate
+from nemo.collections.multimodal.speech_llm.modules.common.audio_text_generation_utils import (
+    generate,
+    generate_per_token,
+)
 from nemo.collections.multimodal.speech_llm.modules.perception_modules import (
     AudioPerceptionModule,
     MultiAudioPerceptionModule,
@@ -1515,6 +1518,62 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 self.test_step_outputs[-1] = outputs
         return outputs
 
+    def predict_one_step(self, batch: dict, batch_idx: int = None, dataloader_idx: Optional[int] = None):
+        inference_config = self.get_inference_config()
+        if inference_config is not None:
+            # need to overwrite some configuration, make it immutable
+            inference_config = inference_config.copy()
+        else:
+            self.set_inference_config(inference_config=default_inference_config)
+            logging.warning(f'inference_config is not set. Use default: {default_inference_config}')
+            inference_config = self.get_inference_config()
+
+        if self.cfg.data.get('end_string', None):
+            inference_config['end_strings'] = [self.cfg.data.end_string]
+
+        global_batch_size_per_gpu = batch['contexts'].size(0)
+        num_micro_batches_before_decode = get_num_microbatches()
+
+        if isinstance(batch, list):
+            inference_config['inputs'] = batch
+        elif 'num_audios' in batch:
+            # peft_eval.py
+            inference_config['inputs'] = (
+                batch['contexts'].cuda(),
+                batch['context_lengths'].cuda(),
+                batch['audio_signal'].cuda(),
+                batch['audio_signal_length'].cuda(),
+                batch['num_audios'].cuda(),
+                batch['context_start_idx'],
+            )
+        elif batch.get("audio_locator_ids", None) is not None:  # multimodal_convo_examples
+            inference_config['inputs'] = (
+                batch['contexts'].cuda(),
+                batch['context_lengths'].cuda(),
+                batch['audio_signal'].cuda(),
+                batch['audio_signal_length'].cuda(),
+                batch['audio_locator_ids'].cuda(),
+            )
+        else:
+            # peft_eval.py
+            inference_config['inputs'] = (
+                batch['contexts'].cuda(),
+                batch['context_lengths'].cuda(),
+                batch['audio_signal'].cuda(),
+                batch['audio_signal_length'].cuda(),
+            )
+        for pred in generate_per_token(self, **inference_config):
+            yield pred
+
+        app_state = AppState()
+        reconfigure_num_microbatches_calculator(
+            rank=app_state.global_rank,
+            rampup_batch_size=None,
+            global_batch_size=global_batch_size_per_gpu * parallel_state.get_data_parallel_world_size(),
+            micro_batch_size=global_batch_size_per_gpu // num_micro_batches_before_decode,
+            data_parallel_size=parallel_state.get_data_parallel_world_size(),
+        )
+
     def predict_step(self, batch: dict, batch_idx: int, dataloader_idx: Optional[int] = None):
         """
         Used to get LLM predictions for validation and test steps based on the given inference config.
@@ -1590,7 +1649,6 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
 
         # add audio offsets to context lengths for properly decoding only the response
         batch['context_lengths'] = batch['context_lengths'].cuda() + response['audio_feat_lens']
-
         return response
 
     def inference_epoch_end(self, outputs, mode, data_cfg):
