@@ -1102,6 +1102,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
             cfg: input yaml config, with trainer, model, exp_manager, etc.
             trainer: trainer object
         """
+        trainer.time_event_callback.logtimeevent.on_model_init_start()
         if (
             cfg.model.get("pretrained_audio_model", None) is None
             and cfg.model.perception.get("encoders", None) is None
@@ -1117,6 +1118,8 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         model_cfg = cls._modify_config(
             base_model_cfg, cfg, audio_model_cfg, add_cfg_to_tree=False, speaker_cfg=speaker_cfg
         )
+        trainer.time_event_callback.logtimeevent.on_model_init_end()
+        trainer.time_event_callback.logtimeevent.on_load_checkpoint_start()
 
         # load llm
         model = cls.restore_from(
@@ -1148,6 +1151,7 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
         if 'inference' in cfg:
             inference_cfg = OmegaConf.to_container(cfg.inference, resolve=True)
             model.set_inference_config(inference_cfg)
+        trainer.time_event_callback.logtimeevent.on_load_checkpoint_end()
         return model
 
     @classmethod
