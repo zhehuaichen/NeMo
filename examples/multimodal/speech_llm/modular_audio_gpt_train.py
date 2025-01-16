@@ -66,7 +66,7 @@ def main(cfg) -> None:
         "app_run_type": "training",
         "app_tag": cfg.exp_manager.name,  # Please change this
         "app_tag_run_name": f"{model_name}-{suffix}",  # Please change this
-        "one_logger_project": "jiashangh-test",  # Please change this
+        "one_logger_project": "nemo-llm",  # Please change this
         "one_logger_run_name": cfg.exp_manager.name,  # Please change this
         "world_size": os.environ.get('WORLD_SIZE', -1),
         "global_batch_size": cfg.get("model").get("global_batch_size", 1),
