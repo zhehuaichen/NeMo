@@ -38,7 +38,7 @@ from nemo.utils.callbacks.dist_ckpt_io import (
     AsyncFinalizerCallback,
     DistributedCheckpointIO,
 )
-from one_logger_utils.ptl import OneLoggerPTLTrainer
+from one_logger_utils.pytorch_lightning import OneLoggerPTLTrainer
 
 
 class MegatronTrainerBuilder:
