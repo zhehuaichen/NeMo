@@ -38,6 +38,7 @@ from nemo.utils.callbacks.dist_ckpt_io import (
     AsyncFinalizerCallback,
     DistributedCheckpointIO,
 )
+from one_logger_utils.pytorch_lightning import OneLoggerPTLTrainer
 
 
 class MegatronTrainerBuilder:
@@ -180,13 +181,13 @@ class MegatronTrainerBuilder:
 
         return callbacks
 
-    def create_trainer(self, callbacks=None) -> Trainer:
+    def create_trainer(self, one_logger_config, callbacks=None) -> Trainer:
         # cfg.trainer.precision becomes None in Trainer if precision_plugins exist since both precision plugins and precision
         precision = self.cfg.trainer.precision
         strategy = self._training_strategy()
         plugins = self._plugins()
         callbacks = self._callbacks(callbacks)
-        trainer = Trainer(plugins=plugins, strategy=strategy, **self.cfg.trainer, callbacks=callbacks)
+        trainer = OneLoggerPTLTrainer(trainer_config=dict(plugins=plugins, strategy=strategy, **self.cfg.trainer, callbacks=callbacks), callback_config=one_logger_config)  # Use OneLoggerPTLTrainer with E2E metrics tracking
         # Restore the precision value after Trainer is built.
         self.cfg.trainer.precision = precision
         return trainer
