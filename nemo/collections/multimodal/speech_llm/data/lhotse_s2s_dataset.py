@@ -613,6 +613,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         num_turns = []
         new_target_texts = []
         new_source_texts = []
+        new_target_source_texts = []
         for id, cut in enumerate(cuts):
 
             def validate_time(input_time):
@@ -632,15 +633,19 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 + 1
             )
 
-            def get_text_from_segments(segments, total_steps):
-                cur_target_text = torch.full(
-                    [total_steps],
-                    (
-                        self.text_processor.tokenizer.pad_id
-                        if hasattr(self.text_processor.tokenizer, 'pad_id')
-                        and self.text_processor.tokenizer.pad_id >= 0
-                        else self.text_processor.tokenizer.unk_id
-                    ),
+            def get_text_from_segments(segments, total_steps, align_to_left=True, cur_target_text=None):
+                cur_target_text = (
+                    torch.full(
+                        [total_steps],
+                        (
+                            self.text_processor.tokenizer.pad_id
+                            if hasattr(self.text_processor.tokenizer, 'pad_id')
+                            and self.text_processor.tokenizer.pad_id >= 0
+                            else self.text_processor.tokenizer.unk_id
+                        ),
+                    )
+                    if cur_target_text is None
+                    else cur_target_text
                 )
                 for i, segment in enumerate(segments):
                     # Extract agent text
@@ -668,17 +673,29 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     cur_target_text[text_start_step] = self.text_processor.bos_id
                     # Note: text can be truncated
                     text_len = min(text_end_step - text_start_step - 1, target_text.shape[0])
-                    cur_target_text[(text_start_step + 1) : (text_start_step + 1 + text_len)] = target_text[:text_len]
+                    if align_to_left:
+                        cur_target_text[(text_start_step + 1) : (text_start_step + 1 + text_len)] = target_text[
+                            :text_len
+                        ]
+                    else:  # to right
+                        cur_target_text[(text_end_step - 1 - text_len) : text_end_step - 1] = target_text[:text_len]
                     cur_target_text[text_end_step] = self.text_processor.eos_id
                 return cur_target_text
 
             cur_target_text = get_text_from_segments(cut.agent_segments, total_steps)
             cur_source_text = get_text_from_segments(cut.user_segments, total_steps)
+            # totably: source text should use user channel timestamp and right aligned if no word timestamp info
+            # TODO: support word timestamp in source text
+            cur_target_source_text = get_text_from_segments(
+                cut.user_segments, total_steps, align_to_left=False, cur_target_text=cur_target_text[:]
+            )
             new_target_texts.append(cur_target_text)
             new_source_texts.append(cur_source_text)
+            new_target_source_texts.append(cur_target_source_text)  # source channel includes both source and target
 
         target_texts_merge, target_text_lengths = collate_and_pad(new_target_texts)
         source_texts_merge, source_text_lengths = collate_and_pad(new_source_texts)
+        target_source_texts_merge, target_source_text_lengths = collate_and_pad(new_target_source_texts)
         assert target_texts_merge.shape[0] == len(num_turns)
 
         # note: the codec id in labels and contexts and others do not consider the offset e.g. speech_eos is 1002
@@ -693,6 +710,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "tokens": target_texts_merge,  # used in _reconfigure_and_process_inference_batch
             "target_texts_merge": target_texts_merge,  # used in prepare_llm_input
             "source_texts_merge": source_texts_merge,  # used in prepare_llm_input
+            "target_source_texts_merge": target_source_texts_merge,  # used in prepare_llm_input
             "contexts": target_texts_merge[:, :1],  # used in inference
             "context_lengths": torch.ones_like(target_text_lengths),
             "target_texts": target_texts_merge,

@@ -1656,6 +1656,28 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             for param in self.model.output_layers.parameters():
                 param.requires_grad = True
 
+    def forward(
+        self,
+        batch,
+        checkpoint_activations_all_layers,
+    ):
+        """
+        Forward pass of the model. We prepend audio embeddings to the instruction and label text tokens as the LLM input.
+        """
+        multimodal_output = super().forward(batch, checkpoint_activations_all_layers)
+        if 'target_source_texts_merge' in batch:
+            input_ids = batch["target_source_texts_merge"][:, :-1]
+            labels = batch["target_source_texts_merge"][:, 1:]
+            loss_mask = torch.ones_like(labels)
+            attention_mask = self._create_attention_mask(input_ids)
+            # can use a 2nd LLM if we like; below we use the same as prototype
+            output = self._gpt_forward(
+                input_ids, None, None, attention_mask, labels, checkpoint_activations_all_layers
+            )
+            multimodal_output['source_target_text'] = (output, loss_mask)
+
+        return multimodal_output
+
 
 class S2sModularAudioGPTModelDepth(S2sModularAudioGPTModel):
     """S2S version of Modularized speech GPT model."""
