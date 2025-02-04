@@ -1668,7 +1668,6 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         multimodal_output = super().forward(batch, checkpoint_activations_all_layers)
         if getattr(self.cfg, 'use_2lm', False):
             if 'target_source_texts_merge' in batch:
-                breakpoint()
                 input_ids = batch["target_source_texts_merge"][:, :-1]
                 labels = batch["target_source_texts_merge"][:, 1:]
                 loss_mask = torch.ones_like(labels)
