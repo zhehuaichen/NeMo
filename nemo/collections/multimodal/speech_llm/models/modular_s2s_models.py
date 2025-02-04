@@ -1350,6 +1350,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                     sliced_text_channel == self.tokenizer.eos_id, self.cfg.data.train_ds.speech_eos_id, answer_codec
                 )
                 if getattr(self.cfg, 'predict_source_text', False):
+                    # TODO: convert all data to s2s_duplex_overlap format so that source text is always right aligned
                     # Also use source_text
                     source_text_channel = audio_batch['source_texts_merge'][i]
                     sliced_source_text_channel = source_text_channel[: answer_codec.shape[0]].unsqueeze(-1)
@@ -1665,16 +1666,18 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         Forward pass of the model. We prepend audio embeddings to the instruction and label text tokens as the LLM input.
         """
         multimodal_output = super().forward(batch, checkpoint_activations_all_layers)
-        if 'target_source_texts_merge' in batch:
-            input_ids = batch["target_source_texts_merge"][:, :-1]
-            labels = batch["target_source_texts_merge"][:, 1:]
-            loss_mask = torch.ones_like(labels)
-            attention_mask = self._create_attention_mask(input_ids)
-            # can use a 2nd LLM if we like; below we use the same as prototype
-            output = self._gpt_forward(
-                input_ids, None, None, attention_mask, labels, checkpoint_activations_all_layers
-            )
-            multimodal_output['source_target_text'] = (output, loss_mask)
+        if getattr(self.cfg, 'use_2lm', False):
+            if 'target_source_texts_merge' in batch:
+                breakpoint()
+                input_ids = batch["target_source_texts_merge"][:, :-1]
+                labels = batch["target_source_texts_merge"][:, 1:]
+                loss_mask = torch.ones_like(labels)
+                attention_mask = self._create_attention_mask(input_ids)
+                # can use a 2nd LLM if we like; below we use the same as prototype
+                output = self._gpt_forward(
+                    input_ids, None, None, attention_mask, labels, checkpoint_activations_all_layers
+                )
+                multimodal_output['source_target_text'] = (output, loss_mask)
 
         return multimodal_output
 
