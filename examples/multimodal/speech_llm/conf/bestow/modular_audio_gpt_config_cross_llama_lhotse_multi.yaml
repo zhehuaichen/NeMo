@@ -12,13 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: megatron_audio_gpt_bestow_lhotse
+# This configuration is similar to modular_audio_gpt_config_cross_llama_lhotse.yaml,
+# with the difference being in how it performs multimodal sampling. 
+# The changes are in model.data.train_ds section.
+# You'll notice that it defines two sub-sections: audio and text.
+# Their names are arbitrary in the sense that you may define more subsections as you like, also with repeated modalities.
+# We still set up a single dataloader, but each sub-section produces its own sampler with its own batch size related settings.
+# That means each sub-section may decide about its own static/dynamic batch sizes, bucketing, etc.
+# These different samplers are later combined into a single sampler using one of three available sampler fusion strategies:
+# round_robin (taking turns), randomized_round_robin (at each step select a sampler according to weights), 
+# or zip (sample mini-batch from each and combine them).
+name: megatron_audio_gpt_bestow_lhotse_multi_sampler
+
+# Note: This config has been updated to work with PromptFormatter API.
+#       If you used an older version that defined a `train_ds.prompt_template` field,
+#       you should specify the prompt format using `train_ds.<group>.prompt_format` now instead.
 
 trainer:
   devices: 1
   accelerator: gpu
   num_nodes: 1
-  precision: 16
+  precision: bf16-mixed
   logger: False # logger provided by exp_manager
   enable_checkpointing: False
   use_distributed_sampler: False
@@ -73,11 +87,6 @@ model:
   freeze_modality_adapter: False
   load_audio_encoder: True
 
-  ## Legacy batch_size configuration
-  # When used with lhotse, the batch composition is decided by dataloader configs
-  # and batch size here is only used for deciding gradient accumulation.
-  # gradient accumulation = global_batch_size / micro_batch_size / data_parallel_size
-  # where data_parallel_size = num_nodes * num_gpus / TP_size
   global_batch_size: 128
   micro_batch_size: 4
   restore_from_path: ??? # Path to an existing .nemo model you wish to add new tasks to or run inference with
@@ -166,6 +175,7 @@ model:
 
     modality_adapter: 
       _target_: nemo.collections.asr.modules.ConformerEncoder
+      sync_max_audio_length: false
       feat_in: 1024
       feat_out: -1 # you may set it if you need different output size other than the default d_model
       n_layers: 2
@@ -231,61 +241,69 @@ model:
     end_string: "[EOG]"
     train_ds:
       use_lhotse: true
+      seed: 0
+      shard_seed: "trng"
+      num_workers: 4
+      shuffle: true
+
       multi_config: true
+      sampler_fusion: randomized_round_robin
+      sampler_weights:
+        audio: 0.5
+        text: 0.5
+
       audio:
-        sampler_fusion: randomized_round_robin
-        sampler_weights: [0.95, 0.05]
         input_cfg: ???
-        seed: 0
-        shard_seed: "trng"
-        batch_size: ???
-        batch_duration: ???
-        quadratic_duration: ???
+        batch_size: null
+        batch_duration: 360
+        quadratic_factor: 15
         use_bucketing: true
         num_buckets: 30
-        bucket_duration_bins: [2.92,3.474,3.924,4.335,4.728,5.11,5.487,5.872,6.288,6.696,7.128,7.62,8.208,8.934,9.883,10.56,11.22,11.88,12.51,13.05,13.59,14.13,14.64,15.17875,15.81,16.54,17.37,18.241,19.18]
-        bucket_buffer_size: ???
-        num_workers: 2
-        shuffle: true
-        shuffle_buffer_size: ???
-        text_field: answer
-        pin_memory: true
-        max_duration: 40  # it is set for LibriSpeech, you may need to update it for your dataset
-        min_duration: 0.1
-      multiturn:
+        bucket_buffer_size: 20000
+        prompt_format: llama2
+      text:
         input_cfg: ???
         use_multimodal_sampling: true
-        batch_size: 1
-        token_equivalent_duration: 0.08
-        # batch_tokens: 2048
-        # quadratic_factor: 2048
-        use_bucketing: false
+        batch_tokens: 8000
+        quadratic_factor: 192
+        use_bucketing: true
         num_buckets: 30
-        num_cuts_for_bins_estimate: 10000
-        bucket_buffer_size: ${model.data.train_ds.audio.bucket_buffer_size}
-        shuffle_buffer_size: ${model.data.train_ds.audio.shuffle_buffer_size}
-        num_workers: ${model.data.train_ds.audio.num_workers}
-        shuffle: true
+        bucket_buffer_size: 20000
+        prompt_format: llama2
 
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
-      max_seq_length: 4096
+      max_seq_length: 2048
       min_seq_length: 1
+      context_key: 'context'
+      answer_key: 'answer'
+      add_eos: True
+      # add_eos: False
       end_string: ${model.data.end_string}
+      add_sep: False
+      add_bos: False
+      separate_prompt_and_response_with_newline: False
+      truncation_field: "context" # Options: ['context', 'answer']
+      index_mapping_dir: null # Path to a directory to write index mapping files.
 
     validation_ds:
+      manifest_filepath: ??? # Path to a list of JSONL files corresponding to the source data. Data format is identical to train_ds.
+      force_finite: true  # workaround to allow using input_cfg
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
       shuffle: False
-      num_workers: 0
+      num_workers: 1
       pin_memory: True
       max_seq_length: 2048
       min_seq_length: 1
       drop_last: False
-      context_key: ${model.data.train_ds.audio.context_key}
+      context_key: ${model.data.train_ds.context_key}
+      answer_key: ${model.data.train_ds.answer_key}
+      add_eos: ${model.data.train_ds.add_eos}
       end_string: ${model.data.end_string}
-      add_eos: True
-      add_bos: False
+      add_sep: ${model.data.train_ds.add_sep}
+      add_bos: ${model.data.train_ds.add_bos}
+      separate_prompt_and_response_with_newline: ${model.data.train_ds.separate_prompt_and_response_with_newline}
       write_predictions_to_file: False
       output_file_path_prefix: null # Prefix of the file to write predictions to.
       truncation_field: "context" # Options: ['context', 'answer']
@@ -299,6 +317,37 @@ model:
         name: "wer" # Name of the evaluation metric to use. Options: ['exact_string_match', 'loss']
         average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
         num_classes: null
+
+    test_ds:
+      manifest_filepath: null # Path to a list of JSONL files corresponding to the source data. Data format is identical to train_ds.
+      force_finite: true  # workaround to allow using input_cfg
+      names: null # Names of the corresponding datasets used to log metrics.
+      global_batch_size: ${model.global_batch_size}
+      micro_batch_size: ${model.micro_batch_size}
+      shuffle: False
+      num_workers: 1
+      pin_memory: True
+      max_seq_length: 2048
+      min_seq_length: 1
+      drop_last: False
+      context_key: ${model.data.train_ds.context_key}
+      answer_key: ${model.data.train_ds.answer_key}
+      add_eos: ${model.data.train_ds.add_eos}
+      end_string: ${model.data.end_string}
+      add_sep: ${model.data.train_ds.add_sep}
+      add_bos: ${model.data.train_ds.add_bos}
+      separate_prompt_and_response_with_newline: ${model.data.train_ds.separate_prompt_and_response_with_newline}
+      write_predictions_to_file: False
+      output_file_path_prefix: null # Prefix of the file to write predictions to.
+      truncation_field: "context" # Options: ['context', 'answer']
+      index_mapping_dir: null # Path to a directory to write index mapping files.
+      # ASR configs
+      sample_rate: 16000 #${model.audio_encoder.preprocessor.sample_rate}
+
+    #   metric:
+    #     name: "loss" # Name of the evaluation metric to use. Options: ['exact_string_match', 'loss']
+    #     average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
+    #     num_classes: null
 
   optim:
     name: fused_adam

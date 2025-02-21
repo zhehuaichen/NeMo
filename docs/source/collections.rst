@@ -25,7 +25,7 @@ Documentation for the individual collections
    multimodal/vlm/intro
    multimodal/text2img/intro
    multimodal/nerf/intro
-   mumtimoda/speech_llm/intro
+   multimodal/speech_llm/intro
 
 .. toctree::
    :maxdepth: 1
@@ -55,3 +55,11 @@ Documentation for the individual collections
    :titlesonly:
 
    tts/intro
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Speech and Audio Processing
+   :name: Speech and Audio Processing
+   :titlesonly:
+
+   audio/intro

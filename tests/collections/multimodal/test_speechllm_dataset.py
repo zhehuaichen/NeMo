@@ -1,7 +1,20 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import pytest
 import torch
 from lhotse import CutSet, MonoCut, SupervisionSegment
-from lhotse.testing.dummies import DummyManifest, dummy_recording
+from lhotse.testing.dummies import dummy_recording
 from torch import tensor
 
 from nemo.collections.common.tokenizers import SentencePieceTokenizer
@@ -25,21 +38,28 @@ def tokenizer(capsys, tmp_path_factory):
     <</SYS>>
     User: Assistant:
     user model
-    Instruct Output 
+    Instruct Output
     \n\n
     <start_of_turn> <end_of_turn>
     <|
     |>
     <|en|> <|de|> <|fr|> <|es|> <|transcribe|> <|translate|> <|pnc|> <|nopnc|> <|startoftranscript|> <|endoftext|>
     Feel free to add new tokens for your own tests!?
-    But know that if you do so, you may need to update the token IDs in the existing tests! 
+    But know that if you do so, you may need to update the token IDs in the existing tests!
     So, it might be a good idea to create a new tokenizer instead when adding new prompt formats.
     """
     tmpdir = tmp_path_factory.mktemp("bpe_tokenizer")
     text_path = tmpdir / "text.txt"
     text_path.write_text(TOKENIZER_TRAIN_TEXT)
     with capsys.disabled():
-        create_spt_model(str(text_path), vocab_size=512, sample_size=-1, do_lower_case=False, output_dir=str(tmpdir))
+        create_spt_model(
+            str(text_path),
+            vocab_size=512,
+            sample_size=-1,
+            do_lower_case=False,
+            output_dir=str(tmpdir),
+            remove_extra_whitespaces=True,
+        )
     return SentencePieceTokenizer(str(tmpdir / "tokenizer.model"))
 
 
@@ -84,7 +104,6 @@ def test_speechllm_dataset(tokenizer, cuts):
     )
 
     batch = dataset[cuts]
-    print(batch)
 
     expected_keys = {
         "sample_ids",
@@ -186,14 +205,14 @@ def llama_tokenizer(capsys, tmp_path_factory):
     <</SYS>>
     User: Assistant:
     user model
-    Instruct Output 
+    Instruct Output
     \n\n
     <start_of_turn> <end_of_turn>
     <|
     |>
     <|en|> <|de|> <|fr|> <|es|> <|transcribe|> <|translate|> <|pnc|> <|nopnc|> <|startoftranscript|> <|endoftext|>
     Feel free to add new tokens for your own tests!?
-    But know that if you do so, you may need to update the token IDs in the existing tests! 
+    But know that if you do so, you may need to update the token IDs in the existing tests!
     So, it might be a good idea to create a new tokenizer instead when adding new prompt formats.
     """
     tmpdir = tmp_path_factory.mktemp("bpe_tokenizer")
@@ -209,6 +228,7 @@ def llama_tokenizer(capsys, tmp_path_factory):
             bos=True,
             eos=True,
             user_defined_symbols=["[INST]", "[/INST]", "<<SYS>>", "<</SYS>>", "[EOG]"],
+            remove_extra_whitespaces=True,
         )
     return SentencePieceTokenizer(str(tmpdir / "tokenizer.model"))
 
@@ -368,8 +388,8 @@ def test_speechllm_dataset_tokens_to_generate_increases_seq_len(llama_tokenizer,
         max_seq_length=512,
     )
     batch = dataset[cuts]
-    assert batch["tokens"].shape == (1, 347)  # was 351 before padding optimization
-    assert batch["labels"].shape == (1, 347)  # was 351 before padding optimization
-    assert batch["contexts"].shape == (1, 337)  # was 352 before padding optimization
-    assert batch["answers"].shape == (1, 267)  # was 352 before padding optimization
-    assert batch["position_ids"].shape == (1, 348)  # was 352 before padding optimization
+    assert batch["tokens"].shape == (1, 91)
+    assert batch["labels"].shape == (1, 91)
+    assert batch["contexts"].shape == (1, 337)
+    assert batch["answers"].shape == (1, 11)
+    assert batch["position_ids"].shape == (1, 92)

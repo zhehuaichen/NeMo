@@ -14,6 +14,7 @@
 import copy
 from pathlib import Path
 
+import omegaconf
 import torch
 from megatron.core import parallel_state
 from omegaconf.omegaconf import OmegaConf
@@ -57,7 +58,6 @@ def build_speechllm_dataset(model_instance, data_cfg, is_train):
         tp = PromptFormatterTextProcessing(
             model_instance.tokenizer,
             prompt_format=data_cfg.get("prompt_format", "plain"),
-            # TODO: remove this and only keep audio_locator_tag flag in input_cfg
             audio_locator=data_cfg.get("audio_locator"),
             max_seq_length=data_cfg.get("max_seq_length", 8192),
         )
@@ -113,7 +113,7 @@ def build_speechllm_dataloader(dataset, data_cfg, consumed_samples=0, is_predict
         # for eval, we need to create separate dataset so as to report splitted numbers
         else:
             dls = []
-            if hasattr(data_cfg, 'manifest_filepath'):
+            if data_cfg.get('manifest_filepath') is not None:
                 manifest_filepath = data_cfg.manifest_filepath
                 for cur_manifest_filepath in manifest_filepath:
                     conf = copy.deepcopy(data_cfg)
@@ -135,10 +135,18 @@ def build_speechllm_dataloader(dataset, data_cfg, consumed_samples=0, is_predict
                     assert len(input_cfg) == 1, "Only one dataset with multiple manifest paths is supported for eval"
                     data_cfg.input_cfg = input_cfg
                     # for getting names
-                    manifest_filepath = [ic.manifest_filepath for ic in input_cfg[0].input_cfg]
+                    manifest_filepath = []
+                    for ic in input_cfg[0].input_cfg:
+                        if hasattr(ic, "manifest_filepath"):
+                            manifest_filepath.append(ic.manifest_filepath)
+                        else:
+                            assert ic.type == "txt_pair"
+                            manifest_filepath.append(ic.target_paths)
                 for cur_input_cfg in input_cfg[0].input_cfg:
                     conf = copy.deepcopy(data_cfg)
                     conf.input_cfg[0].input_cfg = [cur_input_cfg]
+                    OmegaConf.set_struct(conf, False)
+                    conf.force_finite = True
                     dls.append(
                         get_lhotse_dataloader_from_config(
                             conf,

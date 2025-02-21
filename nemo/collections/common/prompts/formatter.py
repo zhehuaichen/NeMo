@@ -1,3 +1,17 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from abc import ABC
 from functools import lru_cache
 from typing import Any, Type
@@ -143,9 +157,10 @@ class PromptFormatter(ABC):
 
     # When set to true, we will insert BOS/EOS symbol at the very beginning/end of the dialog
     # (i.e., not before/after every turn).
-    # We query self.tokenizer.bos / self.tokenizer.eos to get their int IDs.
-    # Note that this is a separate mechanism from BOS_SLOT / EOS_SLOT which allows inserting
-    # these tokens at arbitrary positions in arbitrary turns.
+    # This is intended specifically for LLMs that use sentencepiece tokenizers with BOS/EOS
+    # that don't normally exist in the tokenizer's vocab (i.e., no string input generates them
+    # and you must insert them programmatically);
+    # see: https://github.com/google/sentencepiece/issues/102#issuecomment-397150427
     INSERT_BOS = False
     INSERT_EOS = False
 
