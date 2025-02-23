@@ -1307,6 +1307,11 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             new_user_signal_length = audio_batch['audio_signal_length']
             new_agent_signal = audio_batch['answer_audio']
             new_agent_signal_length = audio_batch['answer_audio_lens']
+
+            if 'voice_prompt' in audio_batch:
+                new_agent_signal_voice_prompt = audio_batch['voice_prompt']
+            if 'voice_prompt_lens' in audio_batch:
+                new_agent_signal_length_voice_prompt = audio_batch['voice_prompt_lens']
             loss_mask = None
             duplex_method = self.cfg.duplex_method
             assert duplex_method == "from_duplex"
@@ -1326,6 +1331,48 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         answer_codecs_lens = torch.Tensor(answer_codecs_lens).long().cuda()
         assert all(torch.isclose(answer_codecs_lens, encoded_len, atol=3))
         encoded_len = answer_codecs_lens
+
+        # Process voice prompts similarly to main audio
+        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+            # The agent and user speech signals use different sample rates, for example:
+            # - Agent speech: 22050 Hz 
+            # - User speech: 16000 Hz 
+            # [TODO] Confirm whether agent sample rate is defined in codec_sample_rate and user sample rate is defined in perception.cfg.preprocessor.sample_rate
+            new_user_signal_voice_prompt_at_agent_sample_rate = [
+                torch.zeros(
+                    length.item(),
+                    dtype=torch.float32,
+                    device=new_agent_signal_length_voice_prompt.device
+                )
+                for length in new_agent_signal_length_voice_prompt
+            ]
+            new_user_signal_voice_prompt = [
+                torchaudio.functional.resample(
+                    signal,
+                    codec_sample_rate,
+                    self.perception.cfg.preprocessor.sample_rate
+                )
+                for signal in new_user_signal_voice_prompt_at_agent_sample_rate
+            ]
+            new_user_signal_length_voice_prompt = torch.tensor(
+                [signal.size(0) for signal in new_user_signal_voice_prompt],
+                dtype=torch.long,
+                device=new_agent_signal_length_voice_prompt.device
+            )
+            new_user_signal_voice_prompt = pad_sequence(new_user_signal_voice_prompt, batch_first=True)
+            encoded_voice_prompt,  encoded_len_voice_prompt = self.perception(
+                input_signal=new_user_signal_voice_prompt,
+                input_signal_length=new_user_signal_length_voice_prompt,
+                processed_signal=None,
+                processed_signal_length=None,
+            )
+            answer_codecs_voice_prompt, answer_codecs_lens_voice_prompt = self._get_codec_embeddings(
+                new_agent_signal_voice_prompt, new_agent_signal_length_voice_prompt
+            )  # list, list
+            answer_codecs_lens_voice_prompt = torch.Tensor(answer_codecs_lens_voice_prompt).long().cuda()
+            assert all(torch.isclose(answer_codecs_lens_voice_prompt, encoded_len_voice_prompt, atol=3))
+            encoded_len_voice_prompt = answer_codecs_lens_voice_prompt
+        
         if 'answer_features_lens' in audio_batch:
             assert 'target_texts_merge' not in audio_batch
             prev_answer_features_lens = (
@@ -1339,6 +1386,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
 
         new_loss_mask = []
         all_channels = []
+        all_channels_voice_prompt = []
         for i, answer_codec in enumerate(answer_codecs):
             if 'target_texts_merge' in audio_batch:
                 text_channel = audio_batch['target_texts_merge'][i]
@@ -1404,6 +1452,16 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                     dim=0,
                 )
                 new_loss_mask.append(cur_loss_mask[: answer_codec.shape[0]])
+            if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+                text_channel_voice_prompt = torch.full(
+                (answer_codecs_voice_prompt[i].shape[0], 1), 
+                self.tokenizer.unk_id, # need to extend the text embedding matrix for new special tokens
+                device=answer_codec.device
+                )
+                # Combine voice prompt channels
+                combined_channels_voice_prompt = torch.cat([text_channel_voice_prompt, answer_codecs_voice_prompt[i]], dim=-1)
+                all_channels_voice_prompt.append(combined_channels_voice_prompt)
+
         all_channels = pad_sequence(all_channels, batch_first=True)
         input_ids = all_channels[:, :-1]
         encoded = encoded[:, : input_ids.shape[1]]
@@ -1412,8 +1470,27 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         # assert labels.shape[1] == encoded.shape[1]
         labels = labels[:, : encoded.shape[1]]
         input_ids = input_ids[:, : encoded.shape[1]]
+
+        # Process voice prompts similarly to main audio
+        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+            all_channels_voice_prompt = pad_sequence(all_channels_voice_prompt, batch_first=True)
+            input_ids_voice_prompt = all_channels_voice_prompt[:, :-1]
+            encoded_voice_prompt = encoded_voice_prompt[:, : input_ids_voice_prompt.shape[1]]
+            encoder_length_voice_prompt =  encoded_len_voice_prompt - 1
+            labels_voice_prompt = all_channels_voice_prompt[:, 1:]
+            labels_voice_prompt = labels_voice_prompt[:, : encoded_voice_prompt.shape[1]]
+            input_ids_voice_prompt = input_ids_voice_prompt[:, : encoded_voice_prompt.shape[1]]
+            labels = torch.cat(( labels_voice_prompt, labels), dim=1)
+            input_ids = torch.cat((input_ids_voice_prompt, input_ids), dim=1)
+            encoded = torch.cat([encoded_voice_prompt, encoded], dim=1)
+            encoder_length = encoder_length_voice_prompt + encoder_length
+            prompt_length = labels_voice_prompt.size(1)  # Get the length of labels_voice_prompt along dimension 1
+
         if 'target_texts_merge' in audio_batch:
             loss_mask = torch.ones_like(labels)
+            if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+                # Set the first `prompt_length` elements of `loss_mask` to 0
+                loss_mask[:, :prompt_length] = 0
             assert self.cfg.get(
                 'duplex_loss_on_all_steps', False
             ), "only support duplex_loss_on_all_steps in real duplex data read from dataloader"

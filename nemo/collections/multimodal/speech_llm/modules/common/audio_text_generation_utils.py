@@ -355,6 +355,8 @@ def generate(
         context_tokens_tensor, context_length_tensor = inputs
     elif isinstance(inputs, tuple) and len(inputs) == 4:
         context_tokens_tensor, context_length_tensor, audio_signal, audio_signal_length = inputs
+    elif model.cfg.get('use_voice_prompt', False):
+        context_tokens_tensor, context_length_tensor, audio_signal, audio_signal_length, voice_prompt, voice_prompt_lens = inputs
     elif isinstance(inputs, tuple) and len(inputs) == 6:  # multi-audio
         has_multi_audios = True
         (
@@ -433,28 +435,53 @@ def generate(
         generate_func = s2s_synced_generate
     else:
         generate_func = synced_generate
-
-    output = generate_func(
-        model,
-        inference_strategy,
-        context_tokens_tensor,
-        context_length_tensor,
-        audio_signal,
-        audio_signal_length,
-        tokens_to_generate,
-        all_probs,
-        temperature,
-        compute_attention_mask=compute_attention_mask,
-        compute_logprob=compute_logprob,
-        top_k=top_k,
-        top_p=top_p,
-        greedy=greedy,
-        repetition_penalty=repetition_penalty,
-        end_strings=end_strings,
-        min_tokens_to_generate=min_tokens_to_generate,
-        num_audios=num_audios,
-        context_start_idx=context_start_idx,
-    )
+    
+    if model.cfg.get('use_voice_prompt', False):
+        output = generate_func(
+            model,
+            inference_strategy,
+            context_tokens_tensor,
+            context_length_tensor,
+            audio_signal,
+            audio_signal_length,
+            tokens_to_generate,
+            all_probs,
+            temperature,
+            compute_attention_mask=compute_attention_mask,
+            compute_logprob=compute_logprob,
+            top_k=top_k,
+            top_p=top_p,
+            greedy=greedy,
+            repetition_penalty=repetition_penalty,
+            end_strings=end_strings,
+            min_tokens_to_generate=min_tokens_to_generate,
+            num_audios=num_audios,
+            context_start_idx=context_start_idx,
+            voice_prompt = voice_prompt,
+            voice_prompt_lens = voice_prompt_lens
+        )
+    else:
+        output = generate_func(
+            model,
+            inference_strategy,
+            context_tokens_tensor,
+            context_length_tensor,
+            audio_signal,
+            audio_signal_length,
+            tokens_to_generate,
+            all_probs,
+            temperature,
+            compute_attention_mask=compute_attention_mask,
+            compute_logprob=compute_logprob,
+            top_k=top_k,
+            top_p=top_p,
+            greedy=greedy,
+            repetition_penalty=repetition_penalty,
+            end_strings=end_strings,
+            min_tokens_to_generate=min_tokens_to_generate,
+            num_audios=num_audios,
+            context_start_idx=context_start_idx,
+        )
     special_tokens = set()
     if hasattr(tokenizer, 'pad_token') and tokenizer.pad_token is not None:
         special_tokens.add(tokenizer.pad_token)
@@ -704,6 +731,8 @@ def s2s_sample_sequence_batch(
     extra={},
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    voice_prompt: Optional[torch.Tensor] = None, 
+    voice_prompt_lens: Optional[torch.Tensor] = None
 ):
     app_state = AppState()
     micro_batch_size = context_tokens.shape[0]
@@ -736,6 +765,8 @@ def s2s_sample_sequence_batch(
             compute_attention_mask,
             num_audios,
             context_start_idx,
+            voice_prompt,
+            voice_prompt_lens
         )
         audio_text_context_lengths = context_lengths + audio_feat_lens
         context_length = audio_text_context_lengths.min().item()
@@ -918,6 +949,8 @@ def s2s_synced_generate(
     min_tokens_to_generate=0,
     num_audios: Optional[torch.Tensor] = None,
     context_start_idx: Optional[List[List[int]]] = None,
+    voice_prompt: Optional[torch.Tensor] = None,  
+    voice_prompt_lens: Optional[torch.Tensor] = None  
 ):
     context_length = context_length_tensor.min().item()
     tokenizer = model.tokenizer
@@ -946,6 +979,8 @@ def s2s_synced_generate(
             },
             num_audios=num_audios,
             context_start_idx=context_start_idx,
+            voice_prompt=voice_prompt,
+            voice_prompt_lens=voice_prompt_lens
         )
 
     for tokens, lengths, output_logits, full_logits, audio_feat_lens in batch_token_iterator:

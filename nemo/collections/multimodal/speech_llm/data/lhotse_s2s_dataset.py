@@ -71,6 +71,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         t5_style: bool = False,
         load_answer_audio: bool = False,
         codec_model_downsampling_factor: float = 1023.5,
+        use_voice_prompt: bool = False, 
+        voice_prompt_max_duration: float = 3.0
     ):
         super().__init__()
         self.text_processor = text_processor
@@ -107,6 +109,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         self.t5_style = t5_style
         if self.codec_sample_rate != self.sample_rate:
             logging.info(f'{self.codec_sample_rate} {self.sample_rate} are different')
+        self.use_voice_prompt = use_voice_prompt
+        self.voice_prompt_max_duration = voice_prompt_max_duration
 
     def _extract_text_and_time_tokens(self, input_sequence):
         # Regular expression to match time tokens (e.g., <|x|> where x is an integer)
@@ -510,6 +514,49 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
     def get_speaker_id(self, cuts):
         speaker_ids = [getattr(cut, "speaker_id", 0) for cut in cuts]
         return torch.tensor(speaker_ids).long()
+    
+    def extract_voice_prompt(self,audio, voice_prompt_metadata, max_duration=3.0):
+        """
+        Extract voice prompts from audio tensor based on voice prompt timing.
+        Truncates segments longer than max_duration, keeps shorter segments as is.
+        Returns a padded batch tensor.
+        
+        Args:
+            audio (torch.Tensor): Input audio tensor of shape [batch, time]
+            voice_prompt_metadata (list): List of dicts containing 'start' and 'end' times
+            max_duration (float): Maximum allowed duration in seconds
+        
+        Returns:
+            tuple: (voice_prompt, voice_prompt_lens)
+                - voice_prompt: Padded tensor of shape [batch, max_length]
+                - voice_prompt_lens: Tensor of actual lengths for each prompt
+        """
+        voice_prompt = []
+        voice_prompt_lens = []
+        max_samples = int(max_duration * self.sample_rate)  # Maximum allowed samples
+
+        for i, prompt in enumerate(voice_prompt_metadata):
+            # Convert time to samples
+            start_sample = int(prompt['start'] * self.sample_rate)
+            end_sample = int(prompt['end'] * self.sample_rate)
+            duration_samples = end_sample - start_sample
+            
+            # Truncate if longer than max_duration
+            actual_samples = min(duration_samples, max_samples)
+            segment = audio[i, start_sample:start_sample + actual_samples]
+            
+            voice_prompt.append(segment)
+            voice_prompt_lens.append(actual_samples)
+        
+        voice_prompt_lens = torch.tensor(voice_prompt_lens).long()
+        # Collate the variable length tensors into a padded batch
+        voice_prompt = collate_vectors(voice_prompt, max_length=max(voice_prompt_lens).item(), padding_value=0.0)
+        
+        # Add batch dimension if missing
+        if voice_prompt.dim() == 1:
+            voice_prompt = voice_prompt.unsqueeze(0)
+        
+        return voice_prompt, voice_prompt_lens
 
     def __getitem__duplex_overlap_(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
         import re
@@ -613,6 +660,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         num_turns = []
         new_target_texts = []
         new_source_texts = []
+        voice_prompt_metadata = []
         for id, cut in enumerate(cuts):
 
             def validate_time(input_time):
@@ -677,12 +725,18 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             new_target_texts.append(cur_target_text)
             new_source_texts.append(cur_source_text)
 
+            if self.use_voice_prompt:
+                voice_prompt_metadata.append(cut.agent_segments[0])
+
         target_texts_merge, target_text_lengths = collate_and_pad(new_target_texts)
         source_texts_merge, source_text_lengths = collate_and_pad(new_source_texts)
         assert target_texts_merge.shape[0] == len(num_turns)
 
         # note: the codec id in labels and contexts and others do not consider the offset e.g. speech_eos is 1002
         # the offset is all considered by SumVocabParallelEmbedding
+        if self.use_voice_prompt:
+            voice_prompt, voice_prompt_lens = self.extract_voice_prompt(answer_audios, voice_prompt_metadata, self.voice_prompt_max_duration)
+
         return_batch = {
             "sample_ids": list(cuts.ids),
             "audio_signal": audio,
@@ -705,6 +759,11 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "s2s_duplex_overlap": torch.ones_like(target_text_lengths),
             "speaker_ids": self.get_speaker_id(cuts),
         }
+        if self.use_voice_prompt:
+            return_batch.update({
+                "voice_prompt": voice_prompt,  # [batch, signal_length]. signal_length = duration_in_seconds * sample_rate
+                "voice_prompt_lens": voice_prompt_lens,  # [batch]. lens = duration_in_seconds * sample_rate
+            })
 
         return return_batch
 

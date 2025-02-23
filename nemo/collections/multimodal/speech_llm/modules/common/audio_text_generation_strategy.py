@@ -347,7 +347,15 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
         tensor_shape = [tokens2use.shape[1], micro_batch_size, self.model.cfg.hidden_size]
         return batch, tensor_shape
 
-    def init_batch_duplex_from_multiturn(self, context_tokens, context_lengths, audio_signal, audio_length):
+    def init_batch_duplex_from_multiturn(
+        self, 
+        context_tokens, 
+        context_lengths, 
+        audio_signal, 
+        audio_length, 
+        voice_prompt=None, 
+        voice_prompt_lens=None
+    ):
         tokens_to_generate = self.model.get_inference_config()['tokens_to_generate']
         speaker_ids = torch.ones_like(context_lengths) * self.model.get_inference_config().get("infer_speaker_id", 0)
         _, answer_audio_lens = self.model.get_duration_by_steps(
@@ -386,6 +394,9 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 'loss_mask': None,
                 'speaker_ids': speaker_ids,
             }
+            if voice_prompt is not None and voice_prompt_lens is not None:
+                batch['voice_prompt'] = voice_prompt
+                batch['voice_prompt_lens'] = voice_prompt_lens
         elif duplex_method == 'from_multiturn':
             batch = {
                 'audio_signal': audio_signal,
@@ -416,6 +427,8 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        voice_prompt: Optional[torch.Tensor] = None,  
+        voice_prompt_lens: Optional[torch.Tensor] = None, 
     ):
         """initialize the batch data before the inference steps."""
         duplex_method = self.model.cfg.get("duplex_method", None)
@@ -424,7 +437,7 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 context_tokens, context_lengths, audio_signal, audio_length, compute_attention_mask, num_audios
             )
         elif duplex_method == "from_multiturn" or duplex_method == "from_duplex":
-            return self.init_batch_duplex_from_multiturn(context_tokens, context_lengths, audio_signal, audio_length)
+            return self.init_batch_duplex_from_multiturn(context_tokens, context_lengths, audio_signal, audio_length, voice_prompt, voice_prompt_lens)
         else:
             raise ValueError(f"duplex_method {duplex_method} not supported")
 
