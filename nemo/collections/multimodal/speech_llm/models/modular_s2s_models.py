@@ -1461,7 +1461,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 # Combine voice prompt channels
                 combined_channels_voice_prompt = torch.cat([text_channel_voice_prompt, answer_codecs_voice_prompt[i]], dim=-1)
                 all_channels_voice_prompt.append(combined_channels_voice_prompt)
-
+        
         all_channels = pad_sequence(all_channels, batch_first=True)
         input_ids = all_channels[:, :-1]
         encoded = encoded[:, : input_ids.shape[1]]
@@ -1474,17 +1474,14 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         # Process voice prompts similarly to main audio
         if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
             all_channels_voice_prompt = pad_sequence(all_channels_voice_prompt, batch_first=True)
-            input_ids_voice_prompt = all_channels_voice_prompt[:, :-1]
-            encoded_voice_prompt = encoded_voice_prompt[:, : input_ids_voice_prompt.shape[1]]
-            encoder_length_voice_prompt =  encoded_len_voice_prompt - 1
-            labels_voice_prompt = all_channels_voice_prompt[:, 1:]
-            labels_voice_prompt = labels_voice_prompt[:, : encoded_voice_prompt.shape[1]]
-            input_ids_voice_prompt = input_ids_voice_prompt[:, : encoded_voice_prompt.shape[1]]
-            labels = torch.cat(( labels_voice_prompt, labels), dim=1)
-            input_ids = torch.cat((input_ids_voice_prompt, input_ids), dim=1)
-            encoded = torch.cat([encoded_voice_prompt, encoded], dim=1)
-            encoder_length = encoder_length_voice_prompt + encoder_length
-            prompt_length = labels_voice_prompt.size(1)  # Get the length of labels_voice_prompt along dimension 1
+            all_channels = torch.cat((all_channels_voice_prompt, all_channels), dim=1)
+            input_ids = all_channels[:, :-1]
+            labels = all_channels[:, 1:]
+            encoded_voice_prompt = encoded_voice_prompt[:, : all_channels_voice_prompt.shape[1]]
+            encoded = torch.cat([encoded_voice_prompt, encoded], dim=1)   
+            # Add by broadcasting the length of the encoded_voice_prompt to the encoder_length of the main audio
+            encoder_length = encoded_voice_prompt.size(1) + encoder_length
+            prompt_length = all_channels_voice_prompt.size(1)  # Get the length of labels_voice_prompt along dimension 1
 
         if 'target_texts_merge' in audio_batch:
             loss_mask = torch.ones_like(labels)
