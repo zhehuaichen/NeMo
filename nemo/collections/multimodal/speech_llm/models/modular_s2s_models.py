@@ -1479,9 +1479,9 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             labels = all_channels[:, 1:]
             encoded_voice_prompt = encoded_voice_prompt[:, : all_channels_voice_prompt.shape[1]]
             encoded = torch.cat([encoded_voice_prompt, encoded], dim=1)   
-            # Add by broadcasting the length of the encoded_voice_prompt to the encoder_length of the main audio
-            encoder_length = encoded_voice_prompt.size(1) + encoder_length
-            prompt_length = all_channels_voice_prompt.size(1)  # Get the length of labels_voice_prompt along dimension 1
+            # Add by broadcasting the length of the encoded_len_voice_prompt/answer_codecs_lens_voice_prompt to the encoder_length of the main audio
+            encoder_length = encoded_len_voice_prompt + encoder_length
+            prompt_length = all_channels_voice_prompt.size(1)  
 
         if 'target_texts_merge' in audio_batch:
             loss_mask = torch.ones_like(labels)
@@ -1534,12 +1534,23 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         if limit_max_seq_length is not None and limit_max_seq_length < labels.shape[1] and self.training:
             import random
 
-            start = random.randint(0, labels.shape[1] - limit_max_seq_length - 1)
-            encoder_input = encoder_input[:, start : start + limit_max_seq_length]
-            labels = labels[:, start : start + limit_max_seq_length]
-            loss_mask = loss_mask[:, start : start + limit_max_seq_length]
-            encoder_length = torch.minimum(encoder_length, torch.tensor(limit_max_seq_length).long().cuda())
-            encoded = encoded[:, start : start + limit_max_seq_length]
+            if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+                # Ensure the first segment of length prompt_length is always included
+                start = random.randint(0, labels.shape[1] - limit_max_seq_length - prompt_length - 1)
+                end = start + (limit_max_seq_length - prompt_length)
+                # Concatenate the first prompt_length segment with the randomly selected segment
+                encoder_input = torch.cat((encoder_input[:, :prompt_length], encoder_input[:, start:end]), dim=1)
+                labels = torch.cat((labels[:, :prompt_length], labels[:, start:end]), dim=1)
+                loss_mask = torch.cat((loss_mask[:, :prompt_length], loss_mask[:, start:end]), dim=1)
+                encoder_length = torch.minimum(encoder_length, torch.tensor(limit_max_seq_length).long().cuda())
+                encoded = torch.cat((encoded[:, :prompt_length], encoded[:, start:end]), dim=1)
+            else:
+                start = random.randint(0, labels.shape[1] - limit_max_seq_length - 1)
+                encoder_input = encoder_input[:, start : start + limit_max_seq_length]
+                labels = labels[:, start : start + limit_max_seq_length]
+                loss_mask = loss_mask[:, start : start + limit_max_seq_length]
+                encoder_length = torch.minimum(encoder_length, torch.tensor(limit_max_seq_length).long().cuda())
+                encoded = encoded[:, start : start + limit_max_seq_length]
 
         encoder_input, labels, loss_mask, encoded, encoder_length = self.inject_speaker_prompt(
             audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
