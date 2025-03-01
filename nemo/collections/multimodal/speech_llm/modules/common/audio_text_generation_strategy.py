@@ -412,11 +412,16 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
             # in real setting, encoded has to be recomputed every time if using bidirectional encoder or incrementally computed
         else:
             raise ValueError(f"duplex_method {duplex_method} not supported")
-
-        encoder_input, _, labels, _, (self.encoded, _) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
+        if voice_prompt is not None and voice_prompt_lens is not None:
+            encoder_input, _, labels, _, (self.encoded, _, prompt_length) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
+        else:
+            encoder_input, _, labels, _, (self.encoded, _) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
         self.attention_mask = self.model._create_attention_mask(encoder_input.transpose(0, 1))
         self.position_ids = build_position_ids(encoder_input.transpose(0, 1)[:, :, 0])
-        return labels, encoder_input, -context_lengths + 1
+        if voice_prompt is not None and voice_prompt_lens is not None:
+            return labels, encoder_input, -context_lengths + 1 + prompt_length
+        else:
+            return labels, encoder_input, -context_lengths + 1
 
     def init_batch(
         self,

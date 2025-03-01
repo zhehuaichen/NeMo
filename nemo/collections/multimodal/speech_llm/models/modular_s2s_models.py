@@ -1559,8 +1559,10 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         attention_mask = self._create_attention_mask(encoder_input)
         if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
             encoder_input = encoder_input.transpose(0, 1).contiguous()
-
-        return encoder_input, attention_mask, labels, loss_mask, (encoded, encoder_length)
+        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+            return encoder_input, attention_mask, labels, loss_mask, (encoded, encoder_length, prompt_length)
+        else:
+            return encoder_input, attention_mask, labels, loss_mask, (encoded, encoder_length)
 
     def inject_speaker_prompt(self, audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length):
         if self.cfg.get('fixed_speaker_prompt', False):
