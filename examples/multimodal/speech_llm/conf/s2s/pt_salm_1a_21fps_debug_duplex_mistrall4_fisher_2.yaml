@@ -124,6 +124,7 @@ model:
 
   use_voice_prompt: True
   voice_prompt_max_duration: 6.0
+  repeat_short_voice_prompt: True
   # use_am_tokenizer: True
   # for MegatronNMTMultiProjModel and datasets
 
@@ -243,6 +244,7 @@ model:
     train_ds:
       use_voice_prompt: ${model.use_voice_prompt}
       voice_prompt_max_duration: ${model.voice_prompt_max_duration}
+      repeat_short_voice_prompt: ${model.repeat_short_voice_prompt}
       multi_config: true
       blackwell:
         sampler_fusion: randomized_round_robin
@@ -3161,6 +3163,7 @@ model:
     validation_ds:
       use_voice_prompt: ${model.use_voice_prompt}
       voice_prompt_max_duration: ${model.voice_prompt_max_duration}
+      repeat_short_voice_prompt: ${model.repeat_short_voice_prompt}
       force_map_dataset: True
       #names: ['Mixtral', 'roleplay', 'callhome', 'nvolve_chatqa', 'daring_anteater_lmsys_sft', 'blackwell']
       names: [ 'callhome']

@@ -72,7 +72,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         load_answer_audio: bool = False,
         codec_model_downsampling_factor: float = 1023.5,
         use_voice_prompt: bool = False, 
-        voice_prompt_max_duration: float = 3.0
+        voice_prompt_max_duration: float = 3.0,
+        repeat_short_voice_prompt: bool = False
     ):
         super().__init__()
         self.text_processor = text_processor
@@ -111,6 +112,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             logging.info(f'{self.codec_sample_rate} {self.sample_rate} are different')
         self.use_voice_prompt = use_voice_prompt
         self.voice_prompt_max_duration = voice_prompt_max_duration
+        self.repeat_short_voice_prompt = repeat_short_voice_prompt
 
     def _extract_text_and_time_tokens(self, input_sequence):
         # Regular expression to match time tokens (e.g., <|x|> where x is an integer)
@@ -515,35 +517,50 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         speaker_ids = [getattr(cut, "speaker_id", 0) for cut in cuts]
         return torch.tensor(speaker_ids).long()
     
-    def extract_voice_prompt(self,audio, voice_prompt_metadata, max_duration=3.0):
+    def extract_voice_prompt(self, audio, voice_prompt_metadata, sample_rate=22050, max_duration=3.0, repeat_short_voice_prompt=False):
         """
         Extract voice prompts from audio tensor based on voice prompt timing.
         Truncates segments longer than max_duration, keeps shorter segments as is.
+        Optionally repeats short voice prompts to fill max_duration.
         Returns a padded batch tensor.
         
         Args:
             audio (torch.Tensor): Input audio tensor of shape [batch, time]
             voice_prompt_metadata (list): List of dicts containing 'start' and 'end' times
+            sample_rate (int, optional): Sample rate of the audio.
             max_duration (float): Maximum allowed duration in seconds
+            repeat_short_voice_prompt (bool): If True, repeat short voice prompts to fill max_duration
         
         Returns:
             tuple: (voice_prompt, voice_prompt_lens)
                 - voice_prompt: Padded tensor of shape [batch, max_length]
                 - voice_prompt_lens: Tensor of actual lengths for each prompt
         """
+
         voice_prompt = []
         voice_prompt_lens = []
-        max_samples = int(max_duration * self.sample_rate)  # Maximum allowed samples
+        max_samples = int(max_duration * sample_rate)  # Maximum allowed samples
 
         for i, prompt in enumerate(voice_prompt_metadata):
             # Convert time to samples
-            start_sample = int(prompt['start'] * self.sample_rate)
-            end_sample = int(prompt['end'] * self.sample_rate)
+            start_sample = int(prompt['start'] * sample_rate)
+            end_sample = int(prompt['end'] * sample_rate)
             duration_samples = end_sample - start_sample
             
-            # Truncate if longer than max_duration
-            actual_samples = min(duration_samples, max_samples)
-            segment = audio[i, start_sample:start_sample + actual_samples]
+            # Extract the segment
+            segment = audio[i, start_sample:end_sample]
+            
+            if repeat_short_voice_prompt and duration_samples < max_samples:
+                # Repeat the segment until we reach or exceed max_samples
+                num_repetitions = max_samples // duration_samples + 1
+                repeated_segment = segment.repeat(num_repetitions)
+                # Trim to max_samples
+                segment = repeated_segment[:max_samples]
+                actual_samples = max_samples
+            else:
+                # Truncate if longer than max_duration
+                actual_samples = min(duration_samples, max_samples)
+                segment = segment[:actual_samples]
             
             voice_prompt.append(segment)
             voice_prompt_lens.append(actual_samples)
@@ -735,7 +752,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         # note: the codec id in labels and contexts and others do not consider the offset e.g. speech_eos is 1002
         # the offset is all considered by SumVocabParallelEmbedding
         if self.use_voice_prompt:
-            voice_prompt, voice_prompt_lens = self.extract_voice_prompt(answer_audios, voice_prompt_metadata, self.voice_prompt_max_duration)
+            voice_prompt, voice_prompt_lens = self.extract_voice_prompt(answer_audios, voice_prompt_metadata, self.codec_sample_rate, self.voice_prompt_max_duration, self.repeat_short_voice_prompt)
 
         return_batch = {
             "sample_ids": list(cuts.ids),

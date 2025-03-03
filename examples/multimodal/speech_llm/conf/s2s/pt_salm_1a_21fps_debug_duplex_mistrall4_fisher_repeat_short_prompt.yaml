@@ -122,9 +122,9 @@ model:
   extract_codec_on_the_fly: True
   codec_model_downsampling_factor: 1024
 
-  use_voice_prompt: False
+  use_voice_prompt: True
   voice_prompt_max_duration: 3.0
-  repeat_short_voice_prompt: False
+  repeat_short_voice_prompt: True
   # use_am_tokenizer: True
   # for MegatronNMTMultiProjModel and datasets
 
