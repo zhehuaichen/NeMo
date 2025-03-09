@@ -3271,6 +3271,9 @@ model:
         - name: "turndiff"
           average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
           num_classes: null
+        - name: "speaker_similarity"
+          average: null
+          num_classes: null
 
   optim:
     name: fused_adam
