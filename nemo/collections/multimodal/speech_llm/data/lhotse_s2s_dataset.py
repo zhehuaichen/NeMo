@@ -217,7 +217,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         skipped_source = 0
         processed_cuts = []
         for cut in cuts:
+            cut.system_prompt = [
+                sup for sup in cut.supervisions if sup.duration == 0.0 and sup.start == 0.0
+            ]  # ignore system prompt
+            assert len(cut.system_prompt) <= 1, f"More than one system prompt in {cut}"
+            cut.system_prompt = cut.system_prompt[0].text if len(cut.system_prompt) > 0 else ''
             cut.supervisions = [sup for sup in cut.supervisions if sup.duration > 0.0]  # ignore system prompt
+
         for cut in cuts:
             if np.isclose(cut.target_audio.duration, cut.recording.duration):
                 is_valid = True
@@ -428,6 +434,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     else self.text_processor.tokenizer.unk_id
                 ),
             )
+
             # assert len(text_start_time[i]) == num_turns[i] // 2
             for j in range(num_turns[i] // 2):
                 text_start_step = get_step_by_time(text_start_time[i][j])
@@ -443,6 +450,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
                 cur_target_text[text_start_step] = self.text_processor.bos_id
                 cur_source_text[text_start_step] = self.text_processor.bos_id
+
                 if getattr(cut, "s2s_duplex", False):
                     # Note: text can be truncated
                     text_len = min(text_end_step - text_start_step - 1, target_texts[cnt].shape[0])
@@ -453,6 +461,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     cur_source_text[(text_start_step + 1) : (text_start_step + 1 + src_text_len)] = source_texts[cnt][
                         :src_text_len
                     ]
+
                 elif getattr(cut, "s2s_duplex_align", False):
                     text_len_plus_eos = torch.tensor(text_end_step - text_start_step)
                     target_texts_expanded = self._expand_text_with_timestamps_and_word_lengths(
@@ -472,10 +481,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 cur_target_text[text_end_step] = self.text_processor.eos_id
                 cur_source_text[text_end_step] = self.text_processor.eos_id
                 cnt += 1
+
             new_target_texts.append(cur_target_text)
             new_source_texts.append(cur_source_text)
+
         target_texts_merge, target_text_lengths = collate_and_pad(new_target_texts)
         source_texts_merge, source_text_lengths = collate_and_pad(new_source_texts)
+
         assert cnt + skipped == len(target_texts)
         assert target_texts_merge.shape[0] == len(num_turns)
         assert cnt + skipped + skipped_source == len(source_texts)
@@ -495,7 +507,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "target_texts_merge": target_texts_merge,  # used in prepare_llm_input
             "source_texts_merge": source_texts_merge,  # used in prepare_llm_input
             "contexts": target_texts_merge[:, :1],  # used in inference
-            "context_lengths": torch.ones_like(target_text_lengths),
+            "context_lengths": torch.ones_like(target_text_lengths),  # placeholder
             "target_texts": target_texts_merge,
             "target_text_lengths": target_text_lengths,
             "answers": target_texts_merge,
@@ -504,6 +516,29 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "num_turns": torch.Tensor(num_turns).long(),
             "speaker_ids": self.get_speaker_id(cuts),
         }
+
+        if hasattr(cut, "include_sys"):  # assume no within batch mixing
+            system_prompts_tensor = []
+            system_prompts_tensor_length = []
+            for cut in cuts:
+
+                source_text = self.text_processor._process_example(context="", output=cut.system_prompt)
+                # -1 to remove the eos token added by the text processor
+                source_text, source_text_length = torch.as_tensor(source_text["answer_ids"][:-1]), torch.as_tensor(
+                    len(source_text["answer_ids"]) - 1
+                )
+                system_prompts_tensor.append(source_text)
+                system_prompts_tensor_length.append(source_text_length)
+            system_prompts_tensor = collate_vectors(
+                system_prompts_tensor,
+                max_length=max(system_prompts_tensor_length),
+                padding_value=self.text_processor.eos_id,
+            ).long()
+            system_prompts_tensor_length = torch.tensor(system_prompts_tensor_length).long()
+            return_batch['system_prompts'] = system_prompts_tensor
+            return_batch['system_prompts_length'] = system_prompts_tensor_length
+            return_batch['contexts'] = system_prompts_tensor
+            return_batch['context_lengths'] = system_prompts_tensor_length
 
         return return_batch
 
@@ -711,24 +746,119 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
     def __getitem__(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
         import re
 
+        # full text data goes here
+        from nemo.collections.common.data.lhotse.text_adapters import (
+            NeMoMultimodalConversation,
+            NeMoSFTExample,
+            SourceTargetTextExample,
+        )
+
+        text_examples = cuts.filter(
+            lambda c: isinstance(c, (SourceTargetTextExample, NeMoSFTExample, NeMoMultimodalConversation))
+        )
+        if text_examples:
+            # reformat text for duplex format
+            if getattr(text_examples[0], "s2s_duplex", False):
+                use_random_padding = getattr(text_examples[0], "random_padding_vtblender", False)  # 2.5 to 4
+                limit_max_seq_length = getattr(text_examples[0], "limit_max_seq_length", False)
+                pad_id = self.text_processor.pad_id
+                bos_id = self.text_processor.bos_id
+                eos_id = self.text_processor.eos_id
+
+                input_ids_all = []
+                answer_ids_all = []
+                context_ids_all = []
+                answer_masks_all = []
+                for text_example in text_examples:
+                    input_ids_list = []
+                    answer_ids_list = []
+                    context_ids_list = []
+                    current_sample_len = 0
+                    for turn in text_example.turns:
+                        cur_turn_tokens = self.text_processor._process_example(context="", output=turn.value)[
+                            "answer_ids"
+                        ][
+                            :-1
+                        ]  # -1 to remove the eos token added by the text processor
+
+                        if not use_random_padding:
+                            pad_full_cur_input = np.full(shape=len(cur_turn_tokens) + 3, fill_value=pad_id)
+                            # create a copy to fill the input
+                            cur_input_text = np.copy(pad_full_cur_input)
+
+                            cur_input_text[0] = bos_id
+                            cur_input_text[-2] = eos_id
+                            cur_input_text[1:-2] = cur_turn_tokens
+                            # keep last token as pad, as done one speech mode
+                        else:
+                            # add extra padding to the text only channel input to emulate speech
+                            number_tokens_with_random_padding = int(len(cur_turn_tokens) * random.uniform(1.7, 2.1))
+                            pad_full_cur_input = np.full(
+                                shape=number_tokens_with_random_padding + 3, fill_value=pad_id
+                            )
+                            # create a copy to fill the input
+                            cur_input_text = np.copy(pad_full_cur_input)
+
+                            cur_input_text[0] = bos_id
+                            cur_input_text[-2] = eos_id
+                            cur_input_text[1 : len(cur_turn_tokens) + 1] = cur_turn_tokens
+
+                        current_sample_len += len(cur_turn_tokens)
+                        # if it has already at least a full first turn conversation and reaches the limit_max_seq_length, ignore the rest
+                        if (
+                            limit_max_seq_length
+                            and len(input_ids_list) >= 2
+                            and (current_sample_len > limit_max_seq_length)
+                        ):
+                            continue
+
+                        if turn.role == "user":
+                            input_ids_list.append(cur_input_text)
+                            answer_ids_list.append(pad_full_cur_input)
+                        else:
+                            input_ids_list.append(pad_full_cur_input)
+                            answer_ids_list.append(cur_input_text)
+
+                        context_ids_list.append(cur_turn_tokens)
+
+                    input_ids = np.concatenate(input_ids_list, axis=0)
+                    input_ids_all.append(input_ids)
+                    answer_ids = np.concatenate(answer_ids_list, axis=0)
+                    answer_ids_all.append(answer_ids)
+                    context_ids = np.concatenate(context_ids_list, axis=0)
+                    context_ids_all.append(context_ids)
+                    # add mask based on the whole output, considering the padding as done on speech duplex mode
+                    answer_masks_all.append(np.ones(len(answer_ids)))
+
+                text_minibatch = dict(
+                    text_input_ids=collate_vectors_lhotse(input_ids_all, padding_value=pad_id),
+                    text_labels_ids=collate_vectors_lhotse(answer_ids_all, padding_value=pad_id),
+                    text_context_ids=collate_vectors_lhotse(context_ids_all, padding_value=pad_id),
+                    text_loss_masks=collate_vectors_lhotse(answer_masks_all, padding_value=0),
+                )
+            else:
+                pad_id = self.text_processor.pad_id
+                text_minibatch = dict(
+                    text_input_ids=collate_vectors_lhotse([e.input_ids for e in text_examples], padding_value=pad_id),
+                    text_answer_ids=collate_vectors_lhotse(
+                        [e.answer_ids for e in text_examples], padding_value=pad_id
+                    ),
+                    text_context_ids=collate_vectors_lhotse(
+                        [e.context_ids for e in text_examples], padding_value=pad_id
+                    ),
+                    text_loss_masks=collate_vectors_lhotse([e.mask for e in text_examples], padding_value=0),
+                )
+                text_minibatch["text_labels_ids"] = text_minibatch["text_input_ids"][:, 1:]
+                text_minibatch["text_input_ids"] = text_minibatch["text_input_ids"][:, :-1]
+                text_minibatch["text_loss_masks"] = text_minibatch["text_loss_masks"][:, 1:]
+
+            return text_minibatch
+
         # full-duplex data goes here
         if getattr(cuts[0], "s2s_duplex", False) or getattr(cuts[0], "s2s_duplex_align", False):
             return self.__getitem__duplex_(cuts)
         if getattr(cuts[0], "s2s_duplex_overlap", False):
             return self.__getitem__duplex_overlap_(cuts)
-        # full text data goes here
-        from nemo.collections.common.data.lhotse.text_adapters import NeMoSFTExample, SourceTargetTextExample
-
-        text_examples = cuts.filter(lambda c: isinstance(c, (SourceTargetTextExample, NeMoSFTExample)))
-        if text_examples:
-            pad_id = self.text_processor.pad_id
-            text_minibatch = dict(
-                text_input_ids=collate_vectors_lhotse([e.input_ids for e in text_examples], padding_value=pad_id),
-                text_answer_ids=collate_vectors_lhotse([e.answer_ids for e in text_examples], padding_value=pad_id),
-                text_context_ids=collate_vectors_lhotse([e.context_ids for e in text_examples], padding_value=pad_id),
-                text_masks=collate_vectors_lhotse([e.mask for e in text_examples], padding_value=0),
-            )
-            return text_minibatch
 
         '''
         # half-duplex single turn s2s data and multi turn s2s data go here
