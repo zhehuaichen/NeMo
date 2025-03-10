@@ -31,6 +31,7 @@ from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import
 from nemo.collections.nlp.modules.common.transformer import transformer_modules
 from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
+from nemo.collections.tts.modules import t5tts_transformer
 from nemo.utils import AppState, logging, model_utils
 import nemo.collections.asr as nemo_asr
 
@@ -85,6 +86,7 @@ class SumVocabParallelEmbedding(tensor_parallel.VocabParallelEmbedding):
     def forward(self, input_):
 
         if input_.ndim == 3:
+            #import pdb; pdb.set_trace()
             assert input_.shape[2] == len(self.proj_head_dims)
             input_ = input_.clone()
             for i in range(len(self.proj_head_dims)):
@@ -126,13 +128,18 @@ class SumMultiEmbedding(LanguageModelEmbedding):
         )
 
 
+# TODO: Move the speech decoder to a new class called S2sMCoreGPTModelSpeechDecoder.
+# This class should include self.model (from MCoreGPTModel) as the LLM backbone and
+# self.speech_decoder_model as the speech decoder, derived from a new class with the projection heads.
+# For v2, disable the vocab mapping and move the agent speech input from LLM-backbone to the speech decoder,
+# alleviating even more the LLMbackbone.
 class S2sMCoreGPTModel(MCoreGPTModel):
-
     def __init__(
         self,
         config: TransformerConfig,
         proj_head_dims: List[int],
         proj_head_loss_weights: List[float],
+        speech_decoder_parms: DictConfig = None,
         *args,
         **kwargs,
     ) -> None:
@@ -140,6 +147,7 @@ class S2sMCoreGPTModel(MCoreGPTModel):
         self.n_proj_heads = len(proj_head_dims)
         self.proj_head_dims = proj_head_dims
         self.proj_head_loss_weights = proj_head_loss_weights
+        self.speech_decoder_parms = dict(speech_decoder_parms) if speech_decoder_parms is not None else None
         self.output_layers = torch.nn.ModuleList(
             [
                 tensor_parallel.ColumnParallelLinear(
@@ -158,6 +166,18 @@ class S2sMCoreGPTModel(MCoreGPTModel):
                 for i in range(self.n_proj_heads)
             ]
         )
+        # ToDo: move the speech decoder to a new class
+        if self.speech_decoder_parms:
+            self.b_t_f_speech_decoder_input = self.speech_decoder_parms.pop("b_t_f_input", False)
+            self.speech_decoder_cfg_unconditional_prob = self.speech_decoder_parms.pop("cfg_unconditional_prob", None)
+            self.speech_decoder = t5tts_transformer.Transformer(**self.speech_decoder_parms)
+            self.text_dim_to_speech_proj = nn.Linear(config.hidden_size, self.speech_decoder_parms["d_model"])
+            self.speech_dim_to_text_proj = nn.Linear(self.speech_decoder_parms["d_model"], config.hidden_size)
+        else:
+            self.speech_decoder = None
+            self.text_dim_to_speech_proj = None
+            self.speech_dim_to_text_proj = None
+            self.b_t_f_speech_decoder_input = False
 
     # TODO rewrite setup_embeddings_and_output_layer to include self.output_layers
 
@@ -194,6 +214,7 @@ class S2sMCoreGPTModel(MCoreGPTModel):
         inference_params: InferenceParams = None,
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
+        speech_mask: Tensor = None,
     ) -> Tensor:
         """Forward function of the GPT Model This function passes the input tensors
         through the embedding layer, and then the decoeder and finally into the post
@@ -240,28 +261,55 @@ class S2sMCoreGPTModel(MCoreGPTModel):
             output_weight = self.shared_embedding_or_output_weight()
         else:
             output_weight = None
-        if input_ids is not None and input_ids.dim() == 2:  # pure text example
-            logits, _ = self.output_layer(
-                hidden_states, weight=output_weight[: self.vocab_size] if output_weight is not None else None
-            )
 
-            if labels is None:
-                # [s b h] => [b s h]
-                return logits.transpose(0, 1).contiguous()
+        # if using speech decoder - ToDo: move this to a new class called S2sMCoreGPTModelSpeechDecoder
+        if self.speech_decoder:
+            hidden_states_dec_input = hidden_states
+            if self.b_t_f_speech_decoder_input:
+                T, B, F = hidden_states_dec_input.size()
+                hidden_states_dec_input = hidden_states_dec_input.reshape(
+                    B, T, F
+                )  # .contiguous().transpose(0, 1) # from [T, B, F] to [B, T, F]
 
-            loss = self.compute_language_model_loss(labels, logits)
+            speech_decoder_input = self.text_dim_to_speech_proj(hidden_states_dec_input)
 
-            return loss
-        else:
+            # workaround for inference, because during inference speech_mask will be None
+            if speech_mask is None:
+                speech_mask = torch.ones((speech_decoder_input.size(0), speech_decoder_input.size(1))).to(
+                    speech_decoder_input.device
+                )
+            else:
+                if not self.b_t_f_speech_decoder_input:
+                    speech_mask = speech_mask.transpose(0, 1)
+
+            if self.speech_decoder_cfg_unconditional_prob and self.training:
+                if torch.rand(1).item() < self.speech_decoder_cfg_unconditional_prob:
+                    # make the whole batch zeros to the unconditional model
+                    speech_decoder_input = torch.zeros_like(speech_decoder_input)
+                    speech_mask = torch.ones_like(speech_mask)
+
+            speech_hidden_states = self.speech_decoder(x=speech_decoder_input, x_mask=speech_mask)['output']
+            speech_hidden_states = self.speech_dim_to_text_proj(
+                speech_hidden_states
+            )  # .transpose(0, 1) # from [B, T, F] to [T, B, F]
+
+            if self.b_t_f_speech_decoder_input:
+                speech_hidden_states = speech_hidden_states.reshape(
+                    T, B, F
+                )  # .contiguous().transpose(0, 1) # from [B, T, F] to [T, B, F]
+
             all_logits = []
             cur_dims = 0
             for i in range(self.n_proj_heads):
                 cur_output_weight = (
                     output_weight[cur_dims : cur_dims + self.proj_head_dims[i]] if output_weight is not None else None
                 )
-                all_logits.append(self.output_layers[i](hidden_states, weight=cur_output_weight)[0])
+                all_logits.append(self.output_layers[i](speech_hidden_states, weight=cur_output_weight)[0])
                 cur_dims += self.proj_head_dims[i]
+
             assert self.vocab_size == self.proj_head_dims[0]
+
+            # LLM head receives llm backbone output
             all_logits[0], _ = self.output_layer(
                 hidden_states, weight=output_weight[: self.vocab_size] if output_weight is not None else None
             )
@@ -281,6 +329,55 @@ class S2sMCoreGPTModel(MCoreGPTModel):
                 / sum(self.proj_head_loss_weights)
             )
             return tokens_loss
+        else:
+            # if text batch (VTBlender)
+            if input_ids is not None and input_ids.dim() == 2:  # pure text example
+                logits, _ = self.output_layer(
+                    hidden_states, weight=output_weight[: self.vocab_size] if output_weight is not None else None
+                )
+
+                if labels is None:
+                    # [s b h] => [b s h]
+                    return logits.transpose(0, 1).contiguous()
+
+                loss = self.compute_language_model_loss(labels, logits)
+
+                return loss
+            else:
+                # if speech batch without the speeech decoder
+                all_logits = []
+                cur_dims = 0
+                for i in range(self.n_proj_heads):
+                    cur_output_weight = (
+                        output_weight[cur_dims : cur_dims + self.proj_head_dims[i]]
+                        if output_weight is not None
+                        else None
+                    )
+                    all_logits.append(self.output_layers[i](hidden_states, weight=cur_output_weight)[0])
+                    cur_dims += self.proj_head_dims[i]
+                assert self.vocab_size == self.proj_head_dims[0]
+                all_logits[0], _ = self.output_layer(
+                    hidden_states, weight=output_weight[: self.vocab_size] if output_weight is not None else None
+                )
+
+                if labels is None:
+                    # [s b h] => [b s h]
+                    return_logits = [logits.transpose(0, 1).contiguous() for logits in all_logits]
+                    return torch.cat(return_logits, dim=-1)  # cat the last dim together to make other mcore code happy
+
+                tokens_loss = torch.stack(
+                    [
+                        self.compute_language_model_loss(labels[:, :, i], all_logits[i])
+                        for i in range(self.n_proj_heads)
+                    ],
+                    axis=2,
+                )
+                tokens_loss = (
+                    tokens_loss
+                    * torch.FloatTensor(self.proj_head_loss_weights).to(tokens_loss.device)
+                    / sum(self.proj_head_loss_weights)
+                )
+                return tokens_loss
 
 
 class S2sMCoreGPTModelDepth(S2sMCoreGPTModel):
@@ -465,6 +562,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 rotary_base=self.cfg.get('rotary_base', 10000),
                 proj_head_dims=self.proj_head_dims,
                 proj_head_loss_weights=self.proj_head_loss_weights,
+                speech_decoder_parms=self.cfg.get('speech_decoder_parms', None),
             )
 
             if self.cfg.get('scale_positional_embedding', False):
@@ -540,6 +638,8 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         trainer.time_event_callback.logtimeevent.on_load_checkpoint_start()
         cls.post_restore_from_pretrained_models(cls, model, cfg)
         trainer.time_event_callback.logtimeevent.on_load_checkpoint_end()
+        # memory
+        cls.codec_model = cls.codec_model.to(torch.bfloat16)
         return model
 
     def load_state_dict(self, state_dict, strict: bool = True):
@@ -583,7 +683,6 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             self.set_inference_config(inference_config=default_inference_config)
         self._inference_config['add_BOS'] = data_cfg.add_bos
         self._inference_config['tokens_to_generate'] = data_cfg.get('tokens_to_generate')
-
         output = self.predict_step(batch, batch_idx, dataloader_idx)
 
         inputs_text = (
@@ -630,7 +729,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 logging.info(f"Label: `{labels_text[i]}`")
                 logging.info(f"Pred: `{preds_text[i]}`")
             logging.info("++++++++++++++++++++++++++++++++++++++++++++++++")
-
+        #import pdb; pdb.set_trace()
         outputs = {
             'loss': loss,
             'preds': output['token_ids'],
@@ -640,8 +739,12 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             'inputs': inputs_text,  # [str]
             'metadata': metadata,  # [dict]
             'batch_idx': batch_idx,
-            'audio_signal': batch.get('audio_signal', None),  # [tensor] Add audio signal to outputs
-            'audio_signal_length': batch.get('audio_signal_length', None),  # [tensor] Add audio length to outputs
+            'audio_signal_length': batch.get('audio_signal_length', None),  
+            'audio_signal': batch.get('audio_signal', None),
+            'system_prompts': batch.get('system_prompts', None),
+            'system_prompts_length': batch.get('system_prompts_length', None),
+            'answer_audio': batch.get('answer_audio', None),
+            'answer_audio_lens': batch.get('answer_audio_lens', None),
         }
 
         if mode == 'validation':
@@ -689,19 +792,19 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             'speech_answers': [],
             'text_answers': [],
             'batch_idx': [],
-            'audio_signal': [],
-            'audio_signal_length': [],
+            'answer_audio': [],
+            'answer_audio_lens': [],
         }
         for outputs in list_outputs:
-            for answer, pred, input, metadata, labels_text, pred_context_length, audio_signal, audio_signal_length in zip(
+            for answer, pred, input, metadata, labels_text, pred_context_length, answer_audio, answer_audio_lens in zip(
                 outputs['labels'],
                 outputs['preds'],
                 outputs['inputs'],
                 outputs['metadata'],
                 outputs['labels_text'],
                 outputs['context_lengths'],
-                outputs['audio_signal'],
-                outputs['audio_signal_length'],
+                outputs['answer_audio'],
+                outputs['answer_audio_lens'],
             ):
                 context_length = 0
                 batch_idx = outputs['batch_idx']
@@ -739,8 +842,8 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 deduplicated_outputs['inputs'].append(input)
                 deduplicated_outputs['metadata'].append(metadata)
                 deduplicated_outputs['batch_idx'].append(batch_idx)
-                deduplicated_outputs['audio_signal'].append(audio_signal)
-                deduplicated_outputs['audio_signal_length'].append(audio_signal_length)
+                deduplicated_outputs['answer_audio'].append(answer_audio)
+                deduplicated_outputs['answer_audio_lens'].append(answer_audio_lens)
 
         # Compute metric score
         metric_name = self.val_metric_name if mode == 'validation' else self.test_metric_name
@@ -756,7 +859,9 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         # the length of the reconstructed audio signal may not exactly match the length of the original audio signal.
         # Therefore, when converting the discrete codec of the predicted audio to a continuous audio signal, 
         # the length of the continuous prediction signal will not match the length of the original ground truth signal.
-        answer_wavs = deduplicated_outputs['audio_signal']
+        answer_wavs = deduplicated_outputs['answer_audio']
+        self.save_wavs(answer_wavs, os.path.join(output_dir, "wav", "answer"), deduplicated_outputs['metadata'])
+        #import pdb; pdb.set_trace()
         # TODO: move the following model init code to init() function
         if run_codec:
             self.additional_models['codec_model'] = self.codec_model
@@ -767,7 +872,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
 
             with torch.no_grad():
                 logging.info(f"Decoding and saving audio")
-                pred_wavs = self.decode_and_save_wavs(
+                pred_wavs, start_end_time = self.decode_and_save_wavs(
                     codec_model,
                     deduplicated_outputs['speech_preds'],
                     os.path.join(output_dir, "wav", "pred"),
@@ -787,10 +892,58 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             asr_model = self.additional_models['asr_model']
 
             with torch.no_grad():
-                logging.info(f"Running ASR on speech preds")
-                asr_batch_size = min(64, len(pred_wavs))
-                speech_preds_transcribed = asr_model.transcribe(pred_wavs, batch_size=asr_batch_size)
-                speech_answers_transcribed = asr_model.transcribe(answer_wavs, batch_size=asr_batch_size)
+                if not self.cfg.get('segment_asr_decode', False):
+                    logging.info(f"Running ASR on speech preds")
+                    asr_batch_size = min(64, len(pred_wavs))
+                    speech_preds_transcribed = asr_model.transcribe(pred_wavs, batch_size=asr_batch_size)
+                    speech_answers_transcribed = asr_model.transcribe(answer_wavs, batch_size=asr_batch_size)
+                else:
+                    logging.info(f"Running ASR on segmented speech preds")
+                    asr_batch_size = min(64, len(answer_wavs))
+                    speech_answers_transcribed = asr_model.transcribe(answer_wavs, batch_size=asr_batch_size)
+                    if isinstance(speech_answers_transcribed, tuple):
+                        speech_answers_transcribed = speech_answers_transcribed[0]
+                    speech_preds_transcribed = []
+                    new_pred_wav = []
+                    num_turns = []
+                    max_length = 0
+                    trans_new_pred_wav = []
+                    for pred_wav, each_start_end_time in zip(pred_wavs, start_end_time):
+                        if len(each_start_end_time) == 0:
+                            num_turns.append(0)
+                            continue
+                        max_length = max(
+                            max_length,
+                            int(max([self.codec_sample_rate * (end - start) for start, end in each_start_end_time])),
+                        )
+                        num_turn = 0
+                        for start, end in each_start_end_time:
+                            start = int(self.codec_sample_rate * start)
+                            end = int(self.codec_sample_rate * end)
+                            if end > start:
+                                num_turn += 1
+                                trans_new_pred_wav.append(pred_wav[start:end])
+                        num_turns.append(num_turn)
+                    if len(trans_new_pred_wav) < 1:
+                        trans_new_pred_wav = pred_wavs
+                        logging.info(
+                            f"Segmented speech preds are empty, using original speech preds. {deduplicated_outputs['metadata']}"
+                        )
+                    asr_batch_size = min(64, len(trans_new_pred_wav))
+                    segmented_speech_preds_transcribed = asr_model.transcribe(
+                        trans_new_pred_wav, batch_size=asr_batch_size
+                    )
+                    if isinstance(segmented_speech_preds_transcribed, tuple):
+                        segmented_speech_preds_transcribed = segmented_speech_preds_transcribed[0]
+                    prev_turns = 0
+                    speech_preds_transcribed = []
+                    for i, num_turn in enumerate(num_turns):
+                        speech_preds_transcribed.append(
+                            "                ".join(
+                                [''] + segmented_speech_preds_transcribed[prev_turns : (prev_turns + num_turn)] + ['']
+                            )
+                        )
+                        prev_turns += num_turn
                 deduplicated_outputs['speech_preds_transcribed'] = speech_preds_transcribed
                 deduplicated_outputs['speech_answers_transcribed'] = speech_answers_transcribed
         pred_wavs_resampled = None
@@ -818,22 +971,37 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             squim_mos_model = self.additional_models['squim_mos_model']
             
 
+            # TODO: use trans_new_pred_wav here too
             with torch.no_grad():
-                logging.info(f"Running MOS prediction")
+                if not self.cfg.get('segment_asr_decode', False):
+                    logging.info(f"Running MOS prediction")
 
-                
-                squim_mos_scores = [
-                    squim_mos_model(pred_wav, answer_wav).cpu()
-                    for pred_wav, answer_wav in zip(pred_wavs_resampled, answer_wavs_resampled)
+                else:
+                    logging.info(f"Running MOS prediction on segmented speech preds")
+                    pred_wavs_resampled = trans_new_pred_wav
+                pred_wavs_resampled = [
+                    torchaudio.functional.resample(wav.cuda(), codec_sample_rate, 16000).unsqueeze(0)
+                    for wav in pred_wavs
                 ]
+                answer_wavs_resampled = [
+                    torchaudio.functional.resample(wav.cuda(), codec_sample_rate, 16000).unsqueeze(0)
+                    for wav in answer_wavs
+                ]
+                if self.cfg.get('segment_asr_decode', False):
+                    squim_mos_scores = [
+                        squim_mos_model(pred_wav, answer_wav.reshape([1, -1]).cuda()).cpu()
+                        for pred_wav, answer_wav in zip(
+                            pred_wavs_resampled, list_outputs[0]['audio_signal'][:1] * len(pred_wavs_resampled)
+                        )
+                    ]
+                else:
+                    squim_mos_scores = [
+                        squim_mos_model(pred_wav, answer_wav).cpu()
+                        for pred_wav, answer_wav in zip(pred_wavs_resampled, answer_wavs_resampled)
+                    ]
                 deduplicated_outputs['mos_scores'] = squim_mos_scores
-        
-
         if run_speaker_similarity:
-            
-
-            # Calculate speaker similarity per sample and store individual scores
-            
+            # Calculate speaker similarity per sample and store individual scores           
             speaker_similarities = []
             for ref_wav, gen_wav in zip(answer_wavs_resampled, pred_wavs_resampled):
                 ref_embedding, _ = self.get_embedding_revised(self.speaker_verification_model, ref_wav, torch.tensor([ref_wav.shape[-1]], device=self.device))
@@ -842,6 +1010,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 speaker_similarities.append(similarity)
             
             deduplicated_outputs['speaker_similarities'] = speaker_similarities
+
         return deduplicated_outputs
 
     def parse_decoder_outputs(
@@ -890,10 +1059,30 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             speech_tokens = torch.zeros([1, new_shape[1]]).long().cuda()
         return text_tokens.long(), speech_tokens.long()
 
+    def save_wavs(self, wavs, wav_dir, metadata_list):
+        sample_rate = self.codec_sample_rate
+        os.makedirs(wav_dir, exist_ok=True)
+        start_end_time = []  # This might not be needed if you're not calculating start/end times
+
+        for wav, metadata in zip(wavs, metadata_list):
+            # Assuming `wav` is already a tensor of the audio signal
+            # If `wav` is not a tensor, you might need to convert it to a tensor first
+            wav = wav.float()  # Ensure the wav is in float format for saving
+            sf.write(
+                os.path.join(
+                    wav_dir, re.sub("_repeat\d*", "", metadata['audio_filepath'].split('.wav')[0]) + ".gen.wav"
+                ),
+                wav.detach().cpu().numpy(),
+                sample_rate,
+            )
+
+        return start_end_time  # Return this only if you still need it for other purposes
+
     def decode_and_save_wavs(self, codec_model, codes_list, wav_dir, metadata_list):
         sample_rate = self.codec_sample_rate
         os.makedirs(wav_dir, exist_ok=True)
         wavs = []
+        start_end_time = []
         for codes, metadata in zip(codes_list, metadata_list):
             codes = torch.tensor(codes).to(codec_model.device).T
             codec_len = torch.Tensor([codes.shape[1]]).long().to(codec_model.device)
@@ -902,12 +1091,33 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             def replace_speech_code(codes, id):
                 return torch.where(codes == id, codes[:, :1], codes)
 
+            def get_index_of_code(codes, id):
+                # d, t
+                idxs = torch.where(codes[0] == id)[0]
+                return self.get_duration_by_steps(idxs)[0]
+
+            # get start time of each turn
+            start_times = get_index_of_code(codes, self.cfg.data.train_ds.speech_bos_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_bos_id)
+            # get end time of each turn
+            end_times = get_index_of_code(codes, self.cfg.data.train_ds.speech_eos_id)
+            if len(start_times) == len(end_times) + 1:
+                end_times = torch.cat(
+                    [
+                        end_times,
+                        torch.full([1], self.get_duration_by_steps(codes.shape[1])[0], device=end_times.device),
+                    ],
+                    axis=0,
+                )
+            end_times = end_times[: len(start_times)]
+            start_times = start_times[: len(end_times)]
+            start_end_time.append([(s, e) for s, e in zip(start_times, end_times)])
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_eos_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_unk_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_pad_id)
-            wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
-            wav = wav[0]
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
+            wav = wav[0].float()
             wavs.append(wav)
             sf.write(
                 os.path.join(
@@ -917,7 +1127,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 sample_rate,
             )
 
-        return wavs
+        return wavs, start_end_time
 
     def inference_epoch_end(self, outputs, mode, data_cfg):
         # Parent class will handle logging of the loss.
@@ -1253,9 +1463,11 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         self.codec_model_downsampling_factor = cfg.get('codec_model_downsampling_factor', 1023.5)
         self.codec_sample_rate = cfg.data.train_ds.get("codec_sample_rate", 22050)
         self.sample_rate = cfg.data.train_ds.get("sample_rate", 16000)
+        self.speech_decoder_parms = cfg.get('speech_decoder_parms', None)
         super().__init__(cfg, trainer)
         if cfg.get('fixed_speaker_prompt', False):
             self.speaker_embeddings = nn.Embedding(16, cfg.hidden_size)
+        self.model = self.model.to(torch.bfloat16)
 
     def _get_codec_embeddings(self, audio_signal, audio_signal_length):
         """Get codec embeddings for the input audio signal."""
@@ -1299,104 +1511,29 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         return out_codec_codes, out_codec_lens
 
     def get_duration_by_steps(self, steps):
-        codec_model_downsampling_factor = self.codec_model_downsampling_factor
+        codec_model_downsampling_factor = torch.tensor(self.codec_model_downsampling_factor)
         decoder_reduction_factor = self.cfg.get("decoder_reduction_factor", 1)
         codec_sample_rate = self.codec_sample_rate
         seconds = steps * codec_model_downsampling_factor / codec_sample_rate * decoder_reduction_factor
-        return seconds, int(seconds * codec_sample_rate)
+        return seconds, (seconds * codec_sample_rate).int()
 
     def get_step_from_audio_len(self, audio_len):
         decoder_reduction_factor = self.cfg.get("decoder_reduction_factor", 1)
         return torch.ceil(audio_len / self.codec_model_downsampling_factor / decoder_reduction_factor).int() - 1
 
     def prepare_llm_input_duplex_from_multiturn(self, audio_batch):
-        codec_sample_rate = self.codec_sample_rate
-        decoder_reduction_factor = self.cfg.get("decoder_reduction_factor", 1)
-        # make the following to be one decoding step so as to easier replace with speech bos token and eos token
-        duplex_inject_silence_second = (
-            self.codec_model_downsampling_factor / codec_sample_rate * decoder_reduction_factor
-        )
-        silence = int(codec_sample_rate * duplex_inject_silence_second)
-        user_signal = audio_batch['audio_signal']
-        user_signal_length = audio_batch['audio_signal_length']
-
-        def resample(audio, audio_lens, orig_sample_rate, target_sample_rate):
-            audio = torchaudio.functional.resample(audio, orig_sample_rate, target_sample_rate)
-            audio_lens = (audio_lens * (target_sample_rate / orig_sample_rate)).int()
-            return audio, audio_lens
-
-        if 'target_texts_merge' not in audio_batch:  # create duplex data from single turn
-            # this branch is not used anymore; duplex data should go to else:
-            labels, loss_mask = (
-                audio_batch['labels'],
-                audio_batch['loss_mask'],
-            )
-            context_lengths = audio_batch['context_lengths']
-
-            assert self.extract_codec_on_the_fly
-            agent_signal = audio_batch['answer_audio']
-            agent_signal_length = audio_batch['answer_audio_lens']
-
-            if self.perception.cfg.preprocessor.sample_rate != codec_sample_rate:
-                user_signal, user_signal_length = resample(
-                    user_signal,
-                    user_signal_length,
-                    self.perception.cfg.preprocessor.sample_rate,
-                    codec_sample_rate,
-                )
-
-            new_user_signal = []
-            new_agent_signal = []
-            new_user_signal_length = []
-            new_agent_signal_length = []
-            silence_value = 0
-            shift_text_channel_len = []
-            agent_bos_eos_step = []
-            for user, agent, user_len, agent_len in zip(
-                user_signal, agent_signal, user_signal_length, agent_signal_length
-            ):
-                user = user[:user_len]
-                agent = agent[:agent_len]
-                # user, silence, agent, silence -> user, bos, agent, eos
-                # TODO: above design means that in real/synthetic data, we need to mark bos and eos timestamp of agent responses
-                silence_piece = torch.full([silence], silence_value).cuda()
-                new_user_signal.append(
-                    torch.cat([user, silence_piece, torch.ones_like(agent) * silence_value, silence_piece], dim=0)
-                )
-                new_agent_signal.append(
-                    torch.cat([torch.ones_like(user) * silence_value, silence_piece, agent, silence_piece], dim=0)
-                )
-                duplex_len = user_len + silence + agent_len + silence
-                # make bos step -1 to be safe for silence+speech boundary
-                agent_bos_eos_step.append(
-                    [self.get_step_from_audio_len(user_len + silence) - 1, self.get_step_from_audio_len(duplex_len)]
-                )
-                new_user_signal_length.append(duplex_len)
-                new_agent_signal_length.append(duplex_len)
-            new_user_signal = pad_sequence(new_user_signal, batch_first=True)
-            new_agent_signal = pad_sequence(new_agent_signal, batch_first=True)
-            new_user_signal_length = torch.Tensor(new_user_signal_length).long().cuda()
-            new_agent_signal_length = torch.Tensor(new_agent_signal_length).long().cuda()
-            if self.perception.cfg.preprocessor.sample_rate != codec_sample_rate:
-                new_user_signal, new_user_signal_length = resample(
-                    new_user_signal,
-                    new_user_signal_length,
-                    codec_sample_rate,
-                    self.perception.cfg.preprocessor.sample_rate,
-                )
-        else:  # real duplex data read from dataloader
-            new_user_signal = audio_batch['audio_signal']
-            new_user_signal_length = audio_batch['audio_signal_length']
-            new_agent_signal = audio_batch['answer_audio']
-            new_agent_signal_length = audio_batch['answer_audio_lens']
-
-            if 'voice_prompt' in audio_batch:
-                new_agent_signal_voice_prompt = audio_batch['voice_prompt']
-            if 'voice_prompt_lens' in audio_batch:
-                new_agent_signal_length_voice_prompt = audio_batch['voice_prompt_lens']
-            loss_mask = None
-            duplex_method = self.cfg.duplex_method
-            assert duplex_method == "from_duplex"
+        # real duplex data read from dataloader
+        new_user_signal = audio_batch['audio_signal']
+        new_user_signal_length = audio_batch['audio_signal_length']
+        new_agent_signal = audio_batch['answer_audio']
+        new_agent_signal_length = audio_batch['answer_audio_lens']
+        if 'voice_prompt' in audio_batch:
+            new_agent_signal_voice_prompt = audio_batch['voice_prompt']
+        if 'voice_prompt_lens' in audio_batch:
+            new_agent_signal_length_voice_prompt = audio_batch['voice_prompt_lens']
+        loss_mask = None
+        duplex_method = self.cfg.duplex_method
+        assert duplex_method == "from_duplex"
 
         # [b, t, c]
         encoded, encoded_len = self.perception(
@@ -1431,7 +1568,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             new_user_signal_voice_prompt = [
                 torchaudio.functional.resample(
                     signal,
-                    codec_sample_rate,
+                    self.codec_sample_rate,
                     self.perception.cfg.preprocessor.sample_rate
                 )
                 for signal in new_user_signal_voice_prompt_at_agent_sample_rate
@@ -1454,51 +1591,22 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             answer_codecs_lens_voice_prompt = torch.Tensor(answer_codecs_lens_voice_prompt).long().cuda()
             assert all(torch.isclose(answer_codecs_lens_voice_prompt, encoded_len_voice_prompt, atol=3))
             encoded_len_voice_prompt = answer_codecs_lens_voice_prompt
-        
-        if 'answer_features_lens' in audio_batch:
-            assert 'target_texts_merge' not in audio_batch
-            prev_answer_features_lens = (
-                torch.ceil(
-                    agent_signal_length / self.codec_model_downsampling_factor / decoder_reduction_factor
-                ).long()
-                + 1
-            )  # bos
-            assert all(prev_answer_features_lens == audio_batch['answer_features_lens'])
-            shift_text_channel_len = answer_codecs_lens - prev_answer_features_lens - 2  # 2 is for bos and eos
 
-        new_loss_mask = []
         all_channels = []
         all_channels_voice_prompt = []
         for i, answer_codec in enumerate(answer_codecs):
-            if 'target_texts_merge' in audio_batch:
-                text_channel = audio_batch['target_texts_merge'][i]
-                sliced_text_channel = text_channel[: answer_codec.shape[0]].unsqueeze(-1)
-                answer_codec = torch.where(
-                    sliced_text_channel == self.tokenizer.bos_id, self.cfg.data.train_ds.speech_bos_id, answer_codec
-                )
-                answer_codec = torch.where(
-                    sliced_text_channel == self.tokenizer.eos_id, self.cfg.data.train_ds.speech_eos_id, answer_codec
-                )
-                if getattr(self.cfg, 'predict_source_text', False):
-                    # Also use source_text
-                    source_text_channel = audio_batch['source_texts_merge'][i]
-                    sliced_source_text_channel = source_text_channel[: answer_codec.shape[0]].unsqueeze(-1)
-            else:
-                # this branch is not used anymore
-                # mask bos and eos following timestamp or synthetic data mark
-                answer_codec[agent_bos_eos_step[i][0]] = self.cfg.data.train_ds.speech_bos_id
-                answer_codec[agent_bos_eos_step[i][1]] = self.cfg.data.train_ds.speech_eos_id
-                pad_id = self.tokenizer.pad_id if self.tokenizer.pad_id > 0 else self.tokenizer.unk_id
-                base_length = -1 + context_lengths[i]
-                text_channel = torch.cat(
-                    [
-                        torch.full([shift_text_channel_len[i], 1], pad_id).cuda(),
-                        torch.full([1, 1], self.tokenizer.bos_id).cuda(),
-                        labels[i, base_length:, :1],
-                    ],
-                    dim=0,
-                )
-                sliced_text_channel = text_channel[: answer_codec.shape[0]]
+            text_channel = audio_batch['target_texts_merge'][i]
+            sliced_text_channel = text_channel[: answer_codec.shape[0]].unsqueeze(-1)
+            answer_codec = torch.where(
+                sliced_text_channel == self.tokenizer.bos_id, self.cfg.data.train_ds.speech_bos_id, answer_codec
+            )
+            answer_codec = torch.where(
+                sliced_text_channel == self.tokenizer.eos_id, self.cfg.data.train_ds.speech_eos_id, answer_codec
+            )
+            if getattr(self.cfg, 'predict_source_text', False):
+                # Also use source_text
+                source_text_channel = audio_batch['source_texts_merge'][i]
+                sliced_source_text_channel = source_text_channel[: answer_codec.shape[0]].unsqueeze(-1)
 
             if getattr(self.cfg, 'predict_source_text', False):
                 # TODO(kevinhu): Add delay to better predict user text.
@@ -1528,12 +1636,6 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                     # checked text_channel, loss_mask;  checked injecting bos and eos properly to control turn taking in inference
                     all_channels.append(torch.cat([sliced_text_channel, answer_codec], dim=-1))
 
-            if 'target_texts_merge' not in audio_batch and loss_mask is not None:
-                cur_loss_mask = torch.cat(
-                    [torch.zeros([shift_text_channel_len[i], loss_mask.shape[-1]]).cuda(), loss_mask[i, base_length:]],
-                    dim=0,
-                )
-                new_loss_mask.append(cur_loss_mask[: answer_codec.shape[0]])
             if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
                 text_channel_voice_prompt = torch.full(
                 (answer_codecs_voice_prompt[i].shape[0], 1), 
@@ -1543,7 +1645,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 # Combine voice prompt channels
                 combined_channels_voice_prompt = torch.cat([text_channel_voice_prompt, answer_codecs_voice_prompt[i]], dim=-1)
                 all_channels_voice_prompt.append(combined_channels_voice_prompt)
-        
+
         all_channels = pad_sequence(all_channels, batch_first=True)
         input_ids = all_channels[:, :-1]
         encoded = encoded[:, : input_ids.shape[1]]
@@ -1564,20 +1666,16 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             # Add by broadcasting the length of the encoded_len_voice_prompt/answer_codecs_lens_voice_prompt to the encoder_length of the main audio
             encoder_length = encoded_len_voice_prompt + encoder_length
             prompt_length = all_channels_voice_prompt.size(1)  
+            labels = labels[:, : encoded.shape[1]]
+            input_ids = input_ids[:, : encoded.shape[1]]
 
-        if 'target_texts_merge' in audio_batch:
-            loss_mask = torch.ones_like(labels)
-            if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
-                # Set the first `prompt_length` elements of `loss_mask` to 0
-                loss_mask[:, :prompt_length] = 0
-            assert self.cfg.get(
-                'duplex_loss_on_all_steps', False
-            ), "only support duplex_loss_on_all_steps in real duplex data read from dataloader"
-        elif loss_mask is not None:
-            loss_mask = pad_sequence(new_loss_mask, batch_first=True)
-            assert loss_mask.shape == labels.shape
-            if self.cfg.get('duplex_loss_on_all_steps', False):
-                loss_mask = torch.ones_like(labels)  # include loss on silence too
+        loss_mask = torch.ones_like(labels)
+        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
+            # Set the first `prompt_length` elements of `loss_mask` to 0
+            loss_mask[:, :prompt_length] = 0
+        assert self.cfg.get(
+            'duplex_loss_on_all_steps', False
+        ), "only support duplex_loss_on_all_steps in real duplex data read from dataloader"
         # lookup input_ids
         if self.cfg.get('megatron_amp_O2', False):
             base_module = self.model.module
@@ -1586,6 +1684,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         lm_embedding = (
             base_module.language_model.embedding if hasattr(base_module, 'language_model') else base_module.embedding
         )
+        
         input_embeds = lm_embedding.word_embeddings(input_ids)
         # merge with encoded
         encoder_input = input_embeds + encoded * self.cfg.get("duplex_user_channel_weight", 0.3)
@@ -1612,13 +1711,22 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             pass
         else:
             raise ValueError(f"Unknown scale_loss_mask_by: {scale_loss_mask_by}")
+
+        encoder_input, labels, loss_mask, encoded, encoder_length = self.inject_speaker_prompt(
+            audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
+        )
+        encoder_input, labels, loss_mask, encoded, encoder_length = self.inject_sys_prompt(
+            audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
+        )
         limit_max_seq_length = self.cfg.get("limit_max_seq_length", None)
+        if prompt_length > limit_max_seq_length:
+            raise ValueError("prompt_length cannot be greater than limit_max_seq_length")
         if limit_max_seq_length is not None and limit_max_seq_length < labels.shape[1] and self.training:
             import random
 
             if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch:
                 # Ensure the first segment of length prompt_length is always included
-                start = random.randint(0, labels.shape[1] - limit_max_seq_length - prompt_length - 1)
+                start = random.randint(prompt_length, prompt_length + labels.shape[1] - limit_max_seq_length - 1)
                 end = start + (limit_max_seq_length - prompt_length)
                 # Concatenate the first prompt_length segment with the randomly selected segment
                 encoder_input = torch.cat((encoder_input[:, :prompt_length], encoder_input[:, start:end]), dim=1)
@@ -1633,10 +1741,6 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 loss_mask = loss_mask[:, start : start + limit_max_seq_length]
                 encoder_length = torch.minimum(encoder_length, torch.tensor(limit_max_seq_length).long().cuda())
                 encoded = encoded[:, start : start + limit_max_seq_length]
-
-        encoder_input, labels, loss_mask, encoded, encoder_length = self.inject_speaker_prompt(
-            audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
-        )
 
         attention_mask = self._create_attention_mask(encoder_input)
         if not hasattr(lm_embedding, 'transpose_batch_sequence') or lm_embedding.transpose_batch_sequence:
@@ -1655,6 +1759,23 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             loss_mask = torch.cat([loss_mask[:, :1], loss_mask], dim=1)
             encoder_length += 1
             encoded = torch.cat([speaker_embeds, encoded], dim=1)
+        return encoder_input, labels, loss_mask, encoded, encoder_length
+
+    def inject_sys_prompt(self, audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length):
+        if 'system_prompts' in audio_batch:
+            system_prompts = audio_batch['system_prompts']
+            system_prompts_length = audio_batch['system_prompts_length']
+            embeddings2use = self._get_text_embeddings(system_prompts, None)
+            # tmp simplified solution
+            encoder_input = torch.cat([embeddings2use.transpose(1, 0), encoder_input], dim=1)
+            labels = torch.cat(
+                [torch.full(list(system_prompts.shape) + [labels.shape[2]], 0, device=labels.device), labels], dim=1
+            )
+            loss_mask = torch.cat(
+                [torch.full(list(system_prompts.shape) + [labels.shape[2]], 0, device=labels.device), loss_mask], dim=1
+            )
+            encoder_length += system_prompts.shape[1]
+            encoded = torch.cat([embeddings2use.transpose(1, 0), encoded], dim=1)
         return encoder_input, labels, loss_mask, encoded, encoder_length
 
     def prepare_llm_input(self, audio_batch):
@@ -1776,6 +1897,92 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             new_encoder_length,
         )
 
+    def _gpt_forward(
+        self,
+        input_ids,
+        position_ids,
+        encoder_input,
+        attention_mask,
+        labels,
+        checkpoint_activations_all_layers,
+        speech_mask=None,
+    ):
+        """Forward pass of the GPT model."""
+        if self.megatron_amp_O2:
+            encoder_input = encoder_input.type(self.model.module.embedding.word_embeddings.weight.dtype)
+        if self.mcore_gpt:
+            output = self.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                decoder_input=encoder_input,
+                attention_mask=attention_mask,
+                labels=labels,
+                speech_mask=speech_mask,
+            )
+        else:
+            output = self.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                encoder_input=encoder_input,
+                attention_mask=attention_mask,
+                labels=labels,
+                checkpoint_activations_all_layers=checkpoint_activations_all_layers,
+                speech_mask=speech_mask,
+            )
+        return output
+
+    def forward(
+        self,
+        batch,
+        checkpoint_activations_all_layers,
+    ):
+        """
+        Forward pass of the model. We prepend audio embeddings to the instruction and label text tokens as the LLM input.
+        """
+        audio_batch = {k: v for k, v in batch.items() if not k.startswith("text_")}
+        text_batch = {k: v for k, v in batch.items() if k.startswith("text_")}
+
+        output, loss_mask = None, None
+
+        multimodal_output = {}
+        if 'audio_signal' in audio_batch:
+            # in this branch, limit_max_seq_length is handled in prepare_llm_input
+            encoder_input, attention_mask, labels, loss_mask, _ = self.prepare_llm_input(audio_batch)
+            # use last position of loss mask as speech mask
+            speech_mask = loss_mask[:, :, -1].reshape(loss_mask.size(0), loss_mask.size(1))
+            output = self._gpt_forward(
+                None,
+                None,
+                encoder_input,
+                attention_mask,
+                labels,
+                checkpoint_activations_all_layers,
+                speech_mask=speech_mask,
+            )
+            multimodal_output['audio_text'] = (output, loss_mask)
+
+        if text_batch:
+            input_ids = text_batch["text_input_ids"]
+            labels = text_batch["text_labels_ids"]
+            loss_mask = text_batch["text_loss_masks"]
+            limit_max_seq_length = self.cfg.get("limit_max_seq_length", None)
+            if limit_max_seq_length is not None and limit_max_seq_length < labels.shape[1] and self.training:
+                # import random
+                # start = random.randint(0, labels.shape[1] - limit_max_seq_length - 1)
+                labels = labels[:, :limit_max_seq_length]
+                input_ids = input_ids[:, :limit_max_seq_length]
+                loss_mask = loss_mask[:, :limit_max_seq_length]
+
+            attention_mask = self._create_attention_mask(input_ids)
+            output = self._gpt_forward(
+                input_ids, None, None, attention_mask, labels, checkpoint_activations_all_layers
+            )
+            multimodal_output['text'] = (output, loss_mask)
+        if not audio_batch and not text_batch:
+            raise ValueError("No input data found for the model.")
+
+        return multimodal_output
+
     @classmethod
     def get_codec_models_and_configs(cls, cfg):
         pretrained_codec_model = cfg.model.get("codec_model_path", None)
@@ -1812,8 +2019,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
     @classmethod
     def get_mos_models_and_configs(cls, cfg):
 
-        squim_mos_model = SQUIM_SUBJECTIVE.get_model()
-        return squim_mos_model
+        return SQUIM_SUBJECTIVE.get_model()
 
     def setup_optimizer_param_groups(self):
         super().setup_optimizer_param_groups()
@@ -1824,8 +2030,19 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 param.requires_grad = True
             for param in self.model.output_layers.parameters():
                 param.requires_grad = True
-            if hasattr(self.model, "output_proj"):
-                for param in self.model.output_proj.parameters():
+            for param in self.model.output_layer.parameters():
+                param.requires_grad = True
+            for param in self.model.decoder.final_layernorm.parameters():
+                param.requires_grad = True
+
+            if self.speech_decoder_parms:
+                for param in self.model.speech_decoder.parameters():
+                    param.requires_grad = True
+
+                for param in self.model.text_dim_to_speech_proj.parameters():
+                    param.requires_grad = True
+
+                for param in self.model.speech_dim_to_text_proj.parameters():
                     param.requires_grad = True
 
 

@@ -394,9 +394,15 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 'loss_mask': None,
                 'speaker_ids': speaker_ids,
             }
+
             if voice_prompt is not None and voice_prompt_lens is not None:
                 batch['voice_prompt'] = voice_prompt
                 batch['voice_prompt_lens'] = voice_prompt_lens
+
+            if all(context_lengths != 1):  # has include_sys tag
+                batch['system_prompts'] = context_tokens
+                batch['system_prompts_length'] = context_lengths
+
         elif duplex_method == 'from_multiturn':
             batch = {
                 'audio_signal': audio_signal,
@@ -418,10 +424,14 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
             encoder_input, _, labels, _, (self.encoded, _) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
         self.attention_mask = self.model._create_attention_mask(encoder_input.transpose(0, 1))
         self.position_ids = build_position_ids(encoder_input.transpose(0, 1)[:, :, 0])
-        if voice_prompt is not None and voice_prompt_lens is not None:
-            return labels, encoder_input, -context_lengths + 1 + prompt_length
+        
+        if all(context_lengths != 1):  # has include_sys tag
+            audio_feat_lens = torch.zeros_like(context_lengths)  # decode from context_lengths
         else:
-            return labels, encoder_input, -context_lengths + 1
+            audio_feat_lens = -context_lengths + 1  # decode from step 0
+        if voice_prompt is not None and voice_prompt_lens is not None:
+            audio_feat_lens +=  prompt_length
+        return labels, encoder_input, audio_feat_lens
 
     def init_batch(
         self,
