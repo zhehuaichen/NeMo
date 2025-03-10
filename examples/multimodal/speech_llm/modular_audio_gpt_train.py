@@ -71,6 +71,8 @@ class PROFILING(pl.Callback):
                 sys.exit(0)
 
 
+import os
+
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf, open_dict
 
@@ -80,6 +82,8 @@ from nemo.core.config import hydra_runner
 from nemo.utils import logging, model_utils
 from nemo.utils.exp_manager import exp_manager
 
+# TODO: figure out a way to identify GPU rank
+# torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 mp.set_start_method("spawn", force=True)
 
 """

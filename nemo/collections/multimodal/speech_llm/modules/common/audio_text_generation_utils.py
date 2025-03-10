@@ -350,7 +350,7 @@ def generate(
     has_multi_audios = False
     num_audios = None
     context_start_idx = None
-    audio_signal, audio_signal_length = None, None
+    
     if isinstance(inputs, tuple) and len(inputs) == 2:
         context_tokens_tensor, context_length_tensor = inputs
     elif isinstance(inputs, tuple) and len(inputs) == 4:
