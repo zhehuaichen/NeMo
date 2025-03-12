@@ -347,7 +347,15 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
         tensor_shape = [tokens2use.shape[1], micro_batch_size, self.model.cfg.hidden_size]
         return batch, tensor_shape
 
-    def init_batch_duplex_from_multiturn(self, context_tokens, context_lengths, audio_signal, audio_length):
+    def init_batch_duplex_from_multiturn(
+        self, 
+        context_tokens, 
+        context_lengths, 
+        audio_signal, 
+        audio_length, 
+        voice_prompt=None, 
+        voice_prompt_lens=None
+    ):
         tokens_to_generate = self.model.get_inference_config()['tokens_to_generate']
         speaker_ids = torch.ones_like(context_lengths) * self.model.get_inference_config().get("infer_speaker_id", 0)
         _, answer_audio_lens = self.model.get_duration_by_steps(
@@ -386,9 +394,15 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 'loss_mask': None,
                 'speaker_ids': speaker_ids,
             }
+
+            if voice_prompt is not None and voice_prompt_lens is not None:
+                batch['voice_prompt'] = voice_prompt
+                batch['voice_prompt_lens'] = voice_prompt_lens
+
             if all(context_lengths != 1):  # has include_sys tag
                 batch['system_prompts'] = context_tokens
                 batch['system_prompts_length'] = context_lengths
+
         elif duplex_method == 'from_multiturn':
             batch = {
                 'audio_signal': audio_signal,
@@ -404,15 +418,19 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
             # in real setting, encoded has to be recomputed every time if using bidirectional encoder or incrementally computed
         else:
             raise ValueError(f"duplex_method {duplex_method} not supported")
-
-        encoder_input, _, labels, _, (self.encoded, _) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
+        if voice_prompt is not None and voice_prompt_lens is not None:
+            encoder_input, _, labels, _, (self.encoded, _, prompt_length) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
+        else:
+            encoder_input, _, labels, _, (self.encoded, _) = self.model.prepare_llm_input_duplex_from_multiturn(batch)
         self.attention_mask = self.model._create_attention_mask(encoder_input.transpose(0, 1))
         self.position_ids = build_position_ids(encoder_input.transpose(0, 1)[:, :, 0])
-
+        
         if all(context_lengths != 1):  # has include_sys tag
             audio_feat_lens = torch.zeros_like(context_lengths)  # decode from context_lengths
         else:
             audio_feat_lens = -context_lengths + 1  # decode from step 0
+        if voice_prompt is not None and voice_prompt_lens is not None:
+            audio_feat_lens +=  prompt_length
         return labels, encoder_input, audio_feat_lens
 
     def init_batch(
@@ -424,6 +442,8 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
         compute_attention_mask: bool,
         num_audios: Optional[torch.Tensor] = None,
         context_start_idx: Optional[List[List[int]]] = None,
+        voice_prompt: Optional[torch.Tensor] = None,  
+        voice_prompt_lens: Optional[torch.Tensor] = None, 
     ):
         """initialize the batch data before the inference steps."""
         duplex_method = self.model.cfg.get("duplex_method", None)
@@ -432,7 +452,7 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 context_tokens, context_lengths, audio_signal, audio_length, compute_attention_mask, num_audios
             )
         elif duplex_method == "from_multiturn" or duplex_method == "from_duplex":
-            return self.init_batch_duplex_from_multiturn(context_tokens, context_lengths, audio_signal, audio_length)
+            return self.init_batch_duplex_from_multiturn(context_tokens, context_lengths, audio_signal, audio_length, voice_prompt, voice_prompt_lens)
         else:
             raise ValueError(f"duplex_method {duplex_method} not supported")
 

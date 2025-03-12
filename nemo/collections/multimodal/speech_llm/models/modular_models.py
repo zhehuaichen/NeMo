@@ -1408,6 +1408,12 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                     batch['audio_signal'].cuda(),
                     batch['audio_signal_length'].cuda(),
                 )
+
+                if 'voice_prompt' in batch and 'voice_prompt_lens' in batch:
+                    inference_config['inputs'] += (
+                        batch['voice_prompt'].cuda(),
+                        batch['voice_prompt_lens'].cuda(),
+                    )
             response = generate(self, **inference_config)
 
         app_state = AppState()
