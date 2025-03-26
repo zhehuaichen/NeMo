@@ -1719,8 +1719,9 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
         )
         limit_max_seq_length = self.cfg.get("limit_max_seq_length", None)
-        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch and prompt_length > limit_max_seq_length:
+        if 'voice_prompt' in audio_batch and 'voice_prompt_lens' in audio_batch and limit_max_seq_length is not None and prompt_length > limit_max_seq_length:
             raise ValueError("prompt_length cannot be greater than limit_max_seq_length")
+        # TODO: limit_max_seq_length for self.inject_sys_prompt and for self.inject_speaker_prompt
         if limit_max_seq_length is not None and limit_max_seq_length < labels.shape[1] and self.training:
             import random
 
