@@ -122,12 +122,11 @@ model:
   extract_codec_on_the_fly: True
   codec_model_downsampling_factor: 1024
 
+  # use_am_tokenizer: True
+  # for MegatronNMTMultiProjModel and datasets
   use_voice_prompt: True
   voice_prompt_max_duration: 6.0
   repeat_short_voice_prompt: True
-
-  # use_am_tokenizer: True
-  # for MegatronNMTMultiProjModel and datasets
 
   peft:
     peft_scheme: "lora"  # can be either lora, adapter, ia3 or ptuning
@@ -246,129 +245,29 @@ model:
       use_voice_prompt: ${model.use_voice_prompt}
       voice_prompt_max_duration: ${model.voice_prompt_max_duration}
       repeat_short_voice_prompt: ${model.repeat_short_voice_prompt}
-      multi_config: true
-      use_lhotse: True
-      seed: 'trng'
-      shuffle: true
-      shard_seed: "trng"
-      sampler_fusion: randomized_round_robin
-      sampler_weights:
-        duplex: 1
-
-      duplex:
+      input_cfg:
+      - type: group
+        weight: 2.0
+        tags:
+          s2s_duplex: True
         input_cfg:
-        - type: group
-          input_cfg:
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/callfriend_eng_south2_LDC2020S08/
-              weight: 1.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000000
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000001
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000002
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000003
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000004
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000005
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000006
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000007
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000008
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p1_LDC2004S13/manifest_000009
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000000
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000001
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000002
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000003
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000004
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000005
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000006
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000007
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000008
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/fisher_eng_p2_LDC2005S13/manifest_000009
-              weight: 8.0
-              tags:
-                s2s_duplex_overlap: True
-        shuffle: True
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket1
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket2
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket4
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket5
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket6
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
+      shuffle: True
       num_workers: 0
       pin_memory: True
       max_seq_length: 512
@@ -409,6 +308,7 @@ model:
       # bucketing params
       bucketing_strategy: "fully_randomized"
       bucketing_batch_size: null
+      use_lhotse: True
       text_field : "text"
       batch_duration : 80  # 0
       quadratic_duration : 30
@@ -421,19 +321,19 @@ model:
       use_voice_prompt: ${model.use_voice_prompt}
       voice_prompt_max_duration: ${model.voice_prompt_max_duration}
       repeat_short_voice_prompt: ${model.repeat_short_voice_prompt}
+      use_lhotse: True
       force_map_dataset: True
-      names: ['callhome']
+      names: ['fisher']
       input_cfg:
         - type: group
           weight: 1.0
           tags:
             lang: en
-          input_cfg:
+          input_cfg: 
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/enhanced_fisher/callhome_eng_LDC97S42/
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/fisher/callhome_eng_LDC97S42 
               tags:
                 s2s_duplex_overlap: True
-          
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}

@@ -1068,9 +1068,12 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             # Assuming `wav` is already a tensor of the audio signal
             # If `wav` is not a tensor, you might need to convert it to a tensor first
             wav = wav.float()  # Ensure the wav is in float format for saving
+            base_path = metadata['audio_filepath']
+            file_name = os.path.basename(base_path)  
+            file_name_without_ext = os.path.splitext(file_name)[0] 
             sf.write(
                 os.path.join(
-                    wav_dir, re.sub("_repeat\d*", "", metadata['audio_filepath'].split('.wav')[0]) + ".gen.wav"
+                    wav_dir, re.sub("_repeat\d*", "", file_name_without_ext) + ".gen.wav"
                 ),
                 wav.detach().cpu().numpy(),
                 sample_rate,
@@ -1119,9 +1122,12 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
             wav = wav[0].float()
             wavs.append(wav)
+            base_path = metadata['audio_filepath']
+            file_name = os.path.basename(base_path)  
+            file_name_without_ext = os.path.splitext(file_name)[0] 
             sf.write(
                 os.path.join(
-                    wav_dir, re.sub("_repeat\d*", "", metadata['audio_filepath'].split('.wav')[0]) + ".gen.wav"
+                    wav_dir, re.sub("_repeat\d*", "", file_name_without_ext) + ".gen.wav"
                 ),
                 wav.detach().cpu().numpy(),
                 sample_rate,
