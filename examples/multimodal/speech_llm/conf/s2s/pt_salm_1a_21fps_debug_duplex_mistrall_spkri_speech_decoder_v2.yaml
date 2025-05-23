@@ -4879,7 +4879,6 @@ model:
         shuffle: True
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
-
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
       num_workers: 0

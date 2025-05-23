@@ -2156,12 +2156,9 @@ model:
             - type: lhotse_shar
               shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
               tags:
-                s2s_duplex: True
+                s2s_duplex: True 
 
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_validation/shar_duplex_1turn/manifest_000000/
-            #   tags:
-            #     s2s_duplex: True
+
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar

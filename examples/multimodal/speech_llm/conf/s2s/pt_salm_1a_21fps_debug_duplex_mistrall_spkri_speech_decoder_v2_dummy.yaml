@@ -353,15 +353,53 @@ model:
           tags:
             lang: en
           input_cfg:
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/squadv2/ # speech SQA
+            #   weight: 0.1
+            #   tags:
+            #     lang: en
+            #     s2s: True
+            #- type: lhotse_shar
+            #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
+            #  tags:
+            #    s2s_duplex: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
               tags:
-                s2s_duplex_overlap: True
-                speaker_id: 1
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/tts/Lindy_dev/
+                #  tags:
+                #    s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/Mixtral8x22b_MMLPC_en/emma_lhotse_shars/normalized_manifest_511
+                #  tags:
+                #    s2s_duplex: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/nvolve_chatqa_test/
+              tags:
+                s2s_duplex: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/340b_8.19_daring_anteater_lmsys_sft_8801rm3.7p_test/
+              tags:
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell_test/
+                #  tags:
+                #    s2s_duplex_overlap: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/ultrachat/shar_duplex/manifest_000019
+              tags:
+                s2s_duplex: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
+              tags:
+                s2s_duplex: True 
             - type: lhotse_shar
               shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
               tags:
                 s2s_duplex: True 
+
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar
