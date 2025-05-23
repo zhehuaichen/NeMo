@@ -104,6 +104,7 @@ def build_speechllm_dataset(model_instance, data_cfg, is_train):
             source_target_text_ratio_limit=data_cfg.get('source_target_text_ratio_limit', 1.0),
             load_answer_audio=data_cfg.get('load_answer_audio', False),
             codec_model_downsampling_factor=data_cfg.get('codec_model_downsampling_factor', 1024),
+            prompt_audio_path=data_cfg.get('prompt_audio_path', None),
         )
 
     # Notably, the data weights are controlled by either bucketing_weights

@@ -2113,7 +2113,7 @@ model:
       force_map_dataset: True
       # names: ['zhehuai_demo']
       # names: ['llamaqa','ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic']
-      names: ['ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic'] 
+      names: ['fisher'] 
       # names: ['alpaca_dev']
       input_cfg:
         - type: group
@@ -2121,47 +2121,28 @@ model:
           tags:
             lang: en
           input_cfg:
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/cchen1/data/inference_llama
-            #   tags:
-            #     s2s_duplex: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex_inf/ultrachat_v2/shar_duplex/manifest_000200/
-              tags:
-                s2s_duplex: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/alpaca_dev_100/
-              tags:
-                s2s_duplex: True    
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_context40/shar_duplex/manifest_000000
-              tags:
-                s2s_duplex: True                 
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
-                #  tags:
-                #    s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/s2s/data_duplex/squadv2_v2_test/
-              tags:
-                s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/synthetic_roleplay_v2_test/
-              tags:
-                s2s_duplex: True       
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
-                #  tags:
-                #    s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
-              tags:
-                s2s_duplex: True
+          # fisher data
+          - type: group
+            weight: 4
+            input_cfg:
 
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_validation/shar_duplex_1turn/manifest_000000/
-            #   tags:
-            #     s2s_duplex: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/fisher/callfriend_eng_south2_LDC2020S08/
+              weight: 15.0
+              tags:
+                s2s_duplex_overlap: True
+
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/fisher/fisher_eng_p1_LDC2004S13/
+              weight: 15.0
+              tags:
+                s2s_duplex_overlap: True
+
+            - type: lhotse_shar
+              weight: 15.0
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/fisher/fisher_eng_p2_LDC2005S13/
+              tags:
+                s2s_duplex_overlap: True
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar
@@ -2170,7 +2151,7 @@ model:
             #   tags:
             #     lang: en
             #     s2s: True
-          
+    
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}

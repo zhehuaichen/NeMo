@@ -2113,7 +2113,7 @@ model:
       force_map_dataset: True
       # names: ['zhehuai_demo']
       # names: ['llamaqa','ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic']
-      names: ['ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic'] 
+      names: ['hifitts_repeat', 'libritts100_repeat', 'libritts360_repeat', 'mls_en_repeat'] 
       # names: ['alpaca_dev']
       input_cfg:
         - type: group
@@ -2126,42 +2126,37 @@ model:
             #   tags:
             #     s2s_duplex: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex_inf/ultrachat_v2/shar_duplex/manifest_000200/
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/hifitts_v0/cuts.{000000..000302}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/recording.{000000..000302}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/target_audio.{000000..000302}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/
               tags:
-                s2s_duplex: True
+                tts_repeat_after_me: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/alpaca_dev_100/
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/libri100/cuts.{000000..000030}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/recording.{000000..000030}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/target_audio.{000000..000030}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/
               tags:
-                s2s_duplex: True    
+                tts_repeat_after_me: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_context40/shar_duplex/manifest_000000
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/libri360/cuts.{000000..000107}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/recording.{000000..000107}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/target_audio.{000000..000107}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/
               tags:
-                s2s_duplex: True                 
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
-                #  tags:
-                #    s2s_duplex: True       
+                tts_repeat_after_me: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/s2s/data_duplex/squadv2_v2_test/
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/InternalMLSEnglish17k/cuts.{000000..004151}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k/recording.{000000..004151}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k/target_audio.{000000..004151}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k
               tags:
-                s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/synthetic_roleplay_v2_test/
-              tags:
-                s2s_duplex: True       
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
-                #  tags:
-                #    s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
-              tags:
-                s2s_duplex: True
-
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_validation/shar_duplex_1turn/manifest_000000/
-            #   tags:
-            #     s2s_duplex: True
+                tts_repeat_after_me: True
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar

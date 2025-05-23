@@ -31,7 +31,6 @@ trainer:
   accumulate_grad_batches: 1
 
 model_target: nemo.collections.multimodal.speech_llm.models.duplex_s2s_speech_decoder.S2sModularAudioGPTModelSpeechDecoder
-# model_target: nemo.collections.multimodal.speech_llm.models.modular_s2s_models.S2sModularAudioGPTModel
 
 exp_manager:
   # explicit_log_dir: null
@@ -94,7 +93,6 @@ model:
     max_length_causal_mask: 5000
     use_learnable_pos_emb: false
     cond_on_prev_audio_tokens: true
-
 
   decoder_reduction_factor: 1
   norm_val_metrics: true
@@ -269,29 +267,49 @@ model:
       shard_seed: "trng"
       sampler_fusion: randomized_round_robin
       sampler_weights:
-        duplex: 1.0
-        blackwell: 0.01
-
+        blackwell: 1.0
       blackwell:
         input_cfg:
         - type: group
+          weight: 1.0
           input_cfg:
           - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket2/
+            weight: 1.0
             tags:
-              s2s_duplex_overlap: True
-              speaker_id: 1
+              s2s_duplex: True
 
-      duplex:
-        input_cfg:
-        - type: group
-          weight: 2.0
-          tags:
-            s2s_duplex: True
-          input_cfg:
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_train/shar_duplex/manifest_000000
+          - type: lhotse_shar
+            weight: 1.0
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket3/
+            tags:
+              s2s_duplex: True
 
+          - type: lhotse_shar
+            weight: 1.0
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket4/
+            tags:
+              s2s_duplex: True
+
+          - type: lhotse_shar
+            weight: 1.0
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket5/
+            tags:
+              s2s_duplex: True
+
+          - type: lhotse_shar
+            weight: 1.0
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket6/
+            tags:
+              s2s_duplex: True
+
+          - type: lhotse_shar
+            weight: 1.0
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/youtube/riva_asr_en_8p1_v2/bucket7/
+            tags:
+              s2s_duplex: True
+
+        shuffle: True
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}
@@ -346,22 +364,70 @@ model:
 
     validation_ds:
       force_map_dataset: True
-      names: ['roleplay','nvolve_chatqa', 'daring_anteater_lmsys_sft', 'ultrachat', 'topic', 'nvolve_multiturn']
+      names: ['daring_anteater_lmsys_sft', 'ultrachat', 'nvolve_multiturn', 'david_ai_test', 'callhome']
       input_cfg:
         - type: group
           weight: 1.0
           tags:
             lang: en
           input_cfg:
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/squadv2/ # speech SQA
+            #   weight: 0.1
+            #   tags:
+            #     lang: en
+            #     s2s: True
+            #- type: lhotse_shar
+            #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
+            #  tags:
+            #    s2s_duplex: True
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
+            #   tags:
+            #     s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/tts/Lindy_dev/
+                #  tags:
+                #    s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/Mixtral8x22b_MMLPC_en/emma_lhotse_shars/normalized_manifest_511
+                #  tags:
+                #    s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/nvolve_chatqa_test/
+                #  tags:
+                #    s2s_duplex: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/340b_8.19_daring_anteater_lmsys_sft_8801rm3.7p_test/
               tags:
-                s2s_duplex_overlap: True
-                speaker_id: 1
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell_test/
+                #  tags:
+                #    s2s_duplex_overlap: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/ultrachat/shar_duplex/manifest_000019
+              tags:
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
+                #  tags:
+                #    s2s_duplex: True 
             - type: lhotse_shar
               shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
               tags:
                 s2s_duplex: True 
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/david_ai/shar/24kHz/bucket_14
+              tags:
+                s2s_duplex_overlap: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/fisher/callhome_eng_LDC97S42/
+              tags:
+                s2s_duplex_overlap: True
+
+
+
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar
@@ -419,9 +485,6 @@ model:
           average: null
           num_classes: null
         - name: "mos"
-        - name: "bleu2"
-          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
-          num_classes: null
         - name: "turndiff"
           average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
           num_classes: null

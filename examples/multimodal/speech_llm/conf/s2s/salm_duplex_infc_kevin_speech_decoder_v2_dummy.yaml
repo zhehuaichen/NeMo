@@ -30,8 +30,8 @@ trainer:
   gradient_clip_val: 1.0
   accumulate_grad_batches: 1
 
-model_target: nemo.collections.multimodal.speech_llm.models.duplex_s2s_speech_decoder.S2sModularAudioGPTModelSpeechDecoder
 # model_target: nemo.collections.multimodal.speech_llm.models.modular_s2s_models.S2sModularAudioGPTModel
+model_target: nemo.collections.multimodal.speech_llm.models.duplex_s2s_speech_decoder.S2sModularAudioGPTModelSpeechDecoder
 
 exp_manager:
   # explicit_log_dir: null
@@ -75,8 +75,8 @@ model:
   proj_head_dims: [32000, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]
   s2s_vocab_size: 48384 # This should be equal to the proj_head_dims[0] + decoder_reduction_factor * sum(proj_head_dims[1:])
   proj_head_loss_weights: [1, 1, 1, 1, 1, 1, 1, 1, 1]
-  cond_llm_backbone_on_speech_tokens: false
-
+  decoder_reduction_factor: 1
+  norm_val_metrics: true
   speech_decoder_parms:
     n_layers: 12
     d_model: 768
@@ -94,10 +94,6 @@ model:
     max_length_causal_mask: 5000
     use_learnable_pos_emb: false
     cond_on_prev_audio_tokens: true
-
-
-  decoder_reduction_factor: 1
-  norm_val_metrics: true
 
   seed: 1234
   tensor_model_parallel_size: 1 # intra-layer model parallelism
@@ -262,40 +258,20 @@ model:
   data:
     end_string: ""
     train_ds:
-      multi_config: true
-      use_lhotse: True
-      seed: 'trng'
-      shuffle: true
-      shard_seed: "trng"
-      sampler_fusion: randomized_round_robin
-      sampler_weights:
-        duplex: 1.0
-        blackwell: 0.01
-
-      blackwell:
+      input_cfg:
+      - type: group
+        weight: 0.00003
         input_cfg:
-        - type: group
-          input_cfg:
-          - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
-            tags:
-              s2s_duplex_overlap: True
-              speaker_id: 1
-
-      duplex:
-        input_cfg:
-        - type: group
-          weight: 2.0
+        - type: lhotse_shar
+          shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/suno_20k/xaa/shar_dir/
           tags:
             s2s_duplex: True
-          input_cfg:
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_train/shar_duplex/manifest_000000
 
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
+      shuffle: True
       num_workers: 0
       pin_memory: True
       max_seq_length: 512
@@ -336,6 +312,7 @@ model:
       # bucketing params
       bucketing_strategy: "fully_randomized"
       bucketing_batch_size: null
+      use_lhotse: True
       text_field : "text"
       batch_duration : 80  # 0
       quadratic_duration : 30
@@ -345,23 +322,27 @@ model:
       duration_bins: null
 
     validation_ds:
+      use_lhotse: True
       force_map_dataset: True
-      names: ['roleplay','nvolve_chatqa', 'daring_anteater_lmsys_sft', 'ultrachat', 'topic', 'nvolve_multiturn']
+      # names: ['zhehuai_demo']
+      # names: ['llamaqa','ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic']
+      names: ['ultrachat_v2'] 
+      # names: ['alpaca_dev']
       input_cfg:
         - type: group
           weight: 1.0
           tags:
             lang: en
           input_cfg:
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fsw/portfolios/llmservice/users/cchen1/data/inference_llama
+            #   tags:
+            #     s2s_duplex: True
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex_inf/ultrachat_v2/shar_duplex/manifest_000200/
               tags:
-                s2s_duplex_overlap: True
-                speaker_id: 1
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
-              tags:
-                s2s_duplex: True 
+                s2s_duplex: True
+
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar
@@ -412,19 +393,22 @@ model:
         - name: "bleu"
           average: null
           num_classes: null
+        - name: "bleu2"
+          average: null
+          num_classes: null
+        - name: "turndiff"
+          average: null
+          num_classes: null
         - name: "asr-bleu"
           average: null
           num_classes: null
         - name: "asr-wer"
           average: null
           num_classes: null
+        - name: "tts-wer"
+          average: null
+          num_classes: null
         - name: "mos"
-        - name: "bleu2"
-          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
-          num_classes: null
-        - name: "turndiff"
-          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
-          num_classes: null
 
   optim:
     name: fused_adam

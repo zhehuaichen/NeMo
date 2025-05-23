@@ -2113,64 +2113,24 @@ model:
       force_map_dataset: True
       # names: ['zhehuai_demo']
       # names: ['llamaqa','ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic']
-      names: ['ultrachat_v2', 'alpaca_dev', 'tqa_context40', 'squadv2_v2_test', 'roleplay1', 'topic'] 
+      names: ['davidai-0', 'davidai-1', 'davidai-10']
       # names: ['alpaca_dev']
       input_cfg:
         - type: group
-          weight: 1.0
+          weight: 14
           tags:
-            lang: en
+            s2s_duplex_overlap: True
+
           input_cfg:
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/cchen1/data/inference_llama
-            #   tags:
-            #     s2s_duplex: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex_inf/ultrachat_v2/shar_duplex/manifest_000200/
-              tags:
-                s2s_duplex: True
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/alpaca_dev_100/
-              tags:
-                s2s_duplex: True    
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_context40/shar_duplex/manifest_000000
-              tags:
-                s2s_duplex: True                 
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
-                #  tags:
-                #    s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/s2s/data_duplex/squadv2_v2_test/
-              tags:
-                s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/synthetic_roleplay_v2_test/
-              tags:
-                s2s_duplex: True       
-                #- type: lhotse_shar
-                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
-                #  tags:
-                #    s2s_duplex: True       
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
-              tags:
-                s2s_duplex: True
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/david_ai/shar/24kHz/bucket_0
 
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_validation/shar_duplex_1turn/manifest_000000/
-            #   tags:
-            #     s2s_duplex: True
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/david_ai/shar/24kHz/bucket_1
 
-            # s2s_shars_21fps_with_wavs
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/alpaca_val/ # speech SQA
-            #   weight: 0.1
-            #   tags:
-            #     lang: en
-            #     s2s: True
-          
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/users/vtrinh/datasets/s2s_shar/duplex/david_ai/shar/24kHz/bucket_10
+
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}

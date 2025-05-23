@@ -31,7 +31,6 @@ trainer:
   accumulate_grad_batches: 1
 
 model_target: nemo.collections.multimodal.speech_llm.models.duplex_s2s_speech_decoder.S2sModularAudioGPTModelSpeechDecoder
-# model_target: nemo.collections.multimodal.speech_llm.models.modular_s2s_models.S2sModularAudioGPTModel
 
 exp_manager:
   # explicit_log_dir: null
@@ -94,7 +93,6 @@ model:
     max_length_causal_mask: 5000
     use_learnable_pos_emb: false
     cond_on_prev_audio_tokens: true
-
 
   decoder_reduction_factor: 1
   norm_val_metrics: true
@@ -269,31 +267,56 @@ model:
       shard_seed: "trng"
       sampler_fusion: randomized_round_robin
       sampler_weights:
-        duplex: 1.0
-        blackwell: 0.01
+        ttsrepeat: 1.0
 
-      blackwell:
+      ttsrepeat:
         input_cfg:
         - type: group
-          input_cfg:
-          - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
-            tags:
-              s2s_duplex_overlap: True
-              speaker_id: 1
-
-      duplex:
-        input_cfg:
-        - type: group
-          weight: 2.0
-          tags:
-            s2s_duplex: True
           input_cfg:
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_train/shar_duplex/manifest_000000
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/hifitts_v0/cuts.{000000..000302}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/recording.{000000..000302}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/target_audio.{000000..000302}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0/
+              tags:
+                tts_repeat_after_me: True
+            - type: lhotse_shar
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/libri100/cuts.{000000..000030}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/recording.{000000..000030}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/target_audio.{000000..000030}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100/
+              tags:
+                tts_repeat_after_me: True
+            - type: lhotse_shar
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/libri360/cuts.{000000..000107}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/recording.{000000..000107}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/target_audio.{000000..000107}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri360/
+              tags:
+                tts_repeat_after_me: True
+            - type: lhotse_shar
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/rivaLindyRodney/cuts.{000000..000042}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/rivaLindyRodney/recording.{000000..000042}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/rivaLindyRodney/target_audio.{000000..000042}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/rivaLindyRodney
+              tags:
+                tts_repeat_after_me: True
+            - type: lhotse_shar
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/InternalMLSEnglish17k/cuts.{000000..004151}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k/recording.{000000..004151}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k/target_audio.{000000..004151}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k
+              tags:
+                tts_repeat_after_me: True
 
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
+
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
       num_workers: 0
@@ -346,7 +369,7 @@ model:
 
     validation_ds:
       force_map_dataset: True
-      names: ['roleplay','nvolve_chatqa', 'daring_anteater_lmsys_sft', 'ultrachat', 'topic', 'nvolve_multiturn']
+      names: ['LibriTTS_dev_clean']
       input_cfg:
         - type: group
           weight: 1.0
@@ -354,23 +377,14 @@ model:
             lang: en
           input_cfg:
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+              shar_path:
+                cuts: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets_repeat_after_me/LibriTTS_dev_clean/cuts.{000000..000005}.jsonl.gz
+                recording: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/LibriTTS_dev_clean/recording.{000000..000005}.tar
+                target_audio: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/LibriTTS_dev_clean/target_audio.{000000..000005}.tar
+              # shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/LibriTTS_dev_clean/
               tags:
-                s2s_duplex_overlap: True
-                speaker_id: 1
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
-              tags:
-                s2s_duplex: True 
+                tts_repeat_after_me: True
 
-            # s2s_shars_21fps_with_wavs
-            # - type: lhotse_shar
-            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/alpaca_val/ # speech SQA
-            #   weight: 0.1
-            #   tags:
-            #     lang: en
-            #     s2s: True
-          
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}

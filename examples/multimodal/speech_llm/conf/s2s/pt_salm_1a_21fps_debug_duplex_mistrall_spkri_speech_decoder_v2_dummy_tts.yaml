@@ -270,7 +270,7 @@ model:
       sampler_fusion: randomized_round_robin
       sampler_weights:
         duplex: 1.0
-        blackwell: 0.01
+        blackwell: 0.05
 
       blackwell:
         input_cfg:
@@ -286,11 +286,27 @@ model:
         input_cfg:
         - type: group
           weight: 2.0
-          tags:
-            s2s_duplex: True
           input_cfg:
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/triviaqa_train/shar_duplex/manifest_000000
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/hifitts_v0
+              tags:
+                tts: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100
+              tags:
+                tts: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/libri100
+              tags:
+                tts: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/rivaLindyRodney
+              tags:
+                tts: True
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/InternalMLSEnglish17k
+              tags:
+                tts: True
 
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
@@ -354,14 +370,9 @@ model:
             lang: en
           input_cfg:
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/TTS/tts_lhotse_datasets/LibriTTS_dev_clean
               tags:
-                s2s_duplex_overlap: True
-                speaker_id: 1
-            - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
-              tags:
-                s2s_duplex: True 
+                tts: True
 
             # s2s_shars_21fps_with_wavs
             # - type: lhotse_shar
