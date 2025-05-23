@@ -2231,21 +2231,22 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
             else:
                 if getattr(self.cfg, 'speech_delay', False):
                     # TODO(kevinhu): Implement cascaded delays across all channels.
+                    text_prepone = self.cfg.get('text_prepone', 0)
                     text_len, text_vocab = sliced_text_channel.shape
                     speech_len, speech_vocab = answer_codec.shape
                     assert text_len == speech_len
                     speech_pad_id = self.cfg.data.train_ds.speech_unk_id
                     text_pad_id = self.tokenizer.eos_id
                     answer_codec_padded = torch.full(
-                        (self.cfg.speech_delay, speech_vocab), speech_pad_id, device=answer_codec.device
+                        (self.cfg.speech_delay - text_prepone, speech_vocab), speech_pad_id, device=answer_codec.device
                     )
                     answer_codec_shifted = torch.cat([answer_codec_padded, answer_codec], dim=0)[:speech_len, :]
                     sliced_text_channel_padded = torch.full(
                         (self.cfg.speech_delay, text_vocab), text_pad_id, device=sliced_text_channel.device
                     )
-                    sliced_text_channel_extended = torch.cat([sliced_text_channel, sliced_text_channel_padded], dim=0)[
-                        :speech_len, :
-                    ]
+                    sliced_text_channel_extended = torch.cat(
+                        [sliced_text_channel[text_prepone:], sliced_text_channel_padded], dim=0
+                    )[:speech_len, :]
                     combined_channels = torch.cat([sliced_text_channel_extended, answer_codec_shifted], dim=-1)
                     all_channels.append(combined_channels)
                 else:
