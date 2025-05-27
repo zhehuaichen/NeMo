@@ -303,7 +303,10 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
             duplex_method == 'from_duplex'
         ):  # in this case, the audio generation should always continue until the max_steps or the end of user channel
             speech_done_token = torch.zeros_like(speech_done_token)
-        if self.model.get_inference_config().get('force_speech_bos', None):
+        if (
+            self.model.get_inference_config().get('force_speech_bos', None)
+            and self.model.cfg.speech_delay < tokens.shape[1]
+        ):
             tokens[:, -1, 1:] = torch.where(
                 tokens[:, -1 - self.model.cfg.speech_delay, :1] == self.model.tokenizer.bos_id,
                 self.model.cfg.speech_bos_id,

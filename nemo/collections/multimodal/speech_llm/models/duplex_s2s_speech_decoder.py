@@ -1247,8 +1247,9 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
         Used for validation and test steps, added postprocessing after calling self.predict_step().
         """
         # make sure speaker encoder is runing in float32 and that it is in eval mode
-        self.model.speech_decoder.speaker_encoder.float()
-        self.model.speech_decoder.speaker_encoder.eval()
+        if hasattr(self.model.speech_decoder, 'speaker_encoder'):
+            self.model.speech_decoder.speaker_encoder.float()
+            self.model.speech_decoder.speaker_encoder.eval()
 
         # Evaluation of multimodal data follows the same pattern as training except predict_step
         batch, batch_idx, dataloader_idx = next(dataloader_iter)

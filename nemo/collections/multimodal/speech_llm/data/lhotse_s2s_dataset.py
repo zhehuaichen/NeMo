@@ -541,8 +541,6 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
         #print(list(cuts.ids)[0])
         """
 
-        agent_turns_merge, agent_turns_lengths = collate_and_pad(new_agent_turns)
-
         assert cnt + skipped == len(target_texts)
         assert target_texts_merge.shape[0] == len(num_turns)
         assert cnt + skipped + skipped_source == len(source_texts)
@@ -737,6 +735,10 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                         else self.text_processor.tokenizer.unk_id
                     ),
                 )
+                cur_agent_turn = torch.full(
+                    [total_steps],
+                    (0),
+                )
                 for i, segment in enumerate(segments):
                     # Extract agent text
                     pattern = r"<\|\d+\|>"
@@ -765,7 +767,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     text_len = min(text_end_step - text_start_step - 1, target_text.shape[0])
                     cur_target_text[(text_start_step + 1) : (text_start_step + 1 + text_len)] = target_text[:text_len]
                     cur_target_text[text_end_step] = self.text_processor.eos_id
-                return cur_target_text
+                    cur_agent_turn[text_start_step : (text_end_step + 1)] = 1
+                return cur_target_text, cur_agent_turn
 
             def get_answer_audio_first_turn_from_segments(segments, answer_audios, id):
                 # consider first segment
