@@ -308,8 +308,19 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
             and self.model.cfg.speech_delay < tokens.shape[1]
         ):
             tokens[:, -1, 1:] = torch.where(
-                tokens[:, -1 - self.model.cfg.speech_delay, :1] == self.model.tokenizer.bos_id,
+                (tokens[:, -1 - self.model.cfg.speech_delay, :1] == self.model.tokenizer.bos_id)
+                * (
+                    torch.sum(tokens[:, -1 - self.model.cfg.speech_delay :, 1:] == self.model.cfg.speech_bos_id, 1)
+                    == 0
+                ),
                 self.model.cfg.speech_bos_id,
+                tokens[:, -1, 1:],
+            )
+        if self.model.get_inference_config().get('force_speech_eos', None):
+            # tmp solution: force to stop talking if user interruption is detected
+            tokens[:, -1, 1:] = torch.where(
+                ((tokens[:, -1, :1] == self.model.tokenizer.eos_id)),
+                self.model.cfg.speech_eos_id,
                 tokens[:, -1, 1:],
             )
 

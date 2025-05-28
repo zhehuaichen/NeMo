@@ -819,8 +819,6 @@ def s2s_sample_sequence_batch(
 
                 # import pdb; pdb.set_trace()
 
-                if inference_strategy.model.get_inference_config().get('unk_boost', None):
-                    logits[0][:, 0] += inference_strategy.model.get_inference_config().get('unk_boost', None)
                 if inference_strategy.model.get_inference_config().get('speech_bos_boost', None):
                     for i in range(1, len(logits)):
                         logits[i][:, model.cfg.speech_bos_id] += inference_strategy.model.get_inference_config().get(
@@ -837,10 +835,6 @@ def s2s_sample_sequence_batch(
                             'speech_sil_boost', None
                         )
 
-                if inference_strategy.model.get_inference_config().get('bos_boost', None):
-                    logits[0][:, 1] += inference_strategy.model.get_inference_config().get('bos_boost', None)
-                if inference_strategy.model.get_inference_config().get('eos_boost', None):
-                    logits[0][:, 2] += inference_strategy.model.get_inference_config().get('eos_boost', None)
                 prev = [get_prev(logits_i, started, temperature, extra) for logits_i in logits]
                 if inference_strategy.model.get_inference_config().get('greedy_on_text', False):
                     prev[0] = get_prev(

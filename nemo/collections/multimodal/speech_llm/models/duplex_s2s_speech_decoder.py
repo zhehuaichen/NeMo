@@ -819,6 +819,12 @@ class S2sMCoreGPTModelSpeechDecoder(MCoreGPTModel):
 
             # sample text logits to get input_text_tokens in inference time
             if self.speech_decoder.use_input_cache and not self.training:
+                if inference_config.get('unk_boost', None):
+                    text_logits[:, :, 0] += inference_config.get('unk_boost', None)
+                if inference_config.get('bos_boost', None):
+                    text_logits[:, :, 1] += inference_config.get('bos_boost', None)
+                if inference_config.get('eos_boost', None):
+                    text_logits[:, :, 2] += inference_config.get('eos_boost', None)
                 B, T = text_logits.size(1), text_logits.size(0)
                 if greedy_on_text or greedy:
                     input_text_tokens = torch.argmax(text_logits, dim=-1).view(B, T).contiguous()
