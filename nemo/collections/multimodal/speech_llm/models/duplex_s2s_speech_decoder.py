@@ -71,6 +71,22 @@ except (ImportError, ModuleNotFoundError):
 default_inference_config = {'tokens_to_generate': 30}
 
 
+@contextmanager
+def fp32_precision():
+    """
+    Workaround for precision related issues when training with bf16-true PyTorch Lightning precision setting.
+    In bf16-true, PTL changes PyTorch's default dtype, which may break implicit assumptions for some models.
+    This context manager restores default float32 precision and runs the computation in float32 autocast context.
+    """
+    default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float32):
+            yield
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+
 class SumVocabParallelEmbedding(tensor_parallel.VocabParallelEmbedding):
 
     def __init__(
@@ -346,7 +362,7 @@ class SpeechDecoder(NeuralModule):
     def get_speaker_embedding(self, audio, audio_len, sr):
         # limit max audio len to avoid memory waste
         audio = audio[:, : int(self.max_speaker_reference_len * sr)]
-        with torch.autocast(device_type="cuda", dtype=torch.float32):
+        with fp32_precision():
             with torch.no_grad():
                 model_sr = self.speaker_encoder._cfg.train_ds.get('sample_rate', 16000)
                 audio_resampled = torchaudio.functional.resample(audio, sr, model_sr)
@@ -1071,7 +1087,7 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
         cls.post_restore_from_pretrained_models(cls, model, cfg)
         trainer.time_event_callback.logtimeevent.on_load_checkpoint_end()
         # memory
-        cls.codec_model = cls.codec_model.to(torch.bfloat16)
+        cls.codec_model = cls.codec_model
         return model
 
     def load_state_dict(self, state_dict, strict: bool = True):
@@ -1653,14 +1669,15 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_eos_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_unk_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_pad_id)
-            codes = replace_speech_code_all(codes, 0)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            codes = replace_speech_code_all(codes, 0).float()
+            with fp32_precision():
                 wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
             wav = wav[0].float()
             wavs.append(wav)
 
             out_audio_path = os.path.join(
-                wav_dir, re.sub("_repeat\d*", "", metadata['audio_filepath'].split('.wav')[0]) + ".gen.wav"
+                wav_dir,
+                re.sub("_repeat\d*", "", os.path.basename(metadata['audio_filepath']).split('.wav')[0]) + ".gen.wav",
             )
             if user_input is not None:
                 # prepare user_input, making sure thart it is in the same shape of agent output
@@ -2088,8 +2105,9 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
             self.additional_models['codec_model'].eval()
         codec_model = self.additional_models['codec_model']
         codec_model.eval()
+        audio_signal = audio_signal.float()
         with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with fp32_precision():
                 original_codec_codes, _ = codec_model.encode(audio=audio_signal, audio_len=audio_signal_length)
                 original_codec_codes = original_codec_codes.transpose(1, 2)
         out_codec_codes = []

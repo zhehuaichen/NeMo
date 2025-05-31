@@ -1132,7 +1132,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             # target text_start_step is the size of user_audio_with_prompt_and_padding minus 1 to avoid cut real speech
             text_start_step = (
                 int(
-                    user_audio_with_prompt_and_padding.size(1)
+                    user_audio_with_prompt_and_padding_output_sr.size(1)
                     / self.codec_model_downsampling_factor
                     / self.decoder_reduction_factor
                 )
