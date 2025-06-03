@@ -2591,41 +2591,11 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
 
         for i in range(batch_size):
 
-            def get_noise(noise_files):
-
-                noise_path = random.choice(noise_files)
-                noise, sr = sf.read(noise_path, dtype='float32')
-
-                # resample noise from sr to self.cfg.data.train_ds.sample_rate
-                if self.cfg.get('noise_resample', False) and sr != self.cfg.data.train_ds.sample_rate:
-                    noise = librosa.resample(noise, orig_sr=sr, target_sr=self.cfg.data.train_ds.sample_rate)
-
-                if len(noise.shape) > 1:
-                    noise = np.mean(noise, axis=1)
-                return noise
-
-            noise = get_noise(noise_files)
-            noise2 = get_noise(noise_files)
-            noise3 = get_noise(noise_files)
-            noise = np.concatenate([noise, noise2, noise3], axis=0)
-            if self.cfg.get('debug_noise_audio', False):
-                self.write_wave(
-                    torch.tensor(noise, dtype=batch_audio.dtype, device=batch_audio.device),
-                    "/lustre/fsw/portfolios/llmservice/users/zhehuaic/works/mod_speech_llm/tmp/dbg_originalnoise.wav",
-                )
-
-            if len(noise) < audio_length:
-
-                repeat_times = (audio_length // len(noise)) + 1
-                noise = np.tile(noise, repeat_times)[:audio_length]
-            else:
-
-                start_idx = random.randint(0, len(noise) - audio_length)
-                noise = noise[start_idx : start_idx + audio_length]
-
-            noise_tensor = torch.tensor(noise, dtype=batch_audio.dtype, device=batch_audio.device)
-
             def get_scale_factor(signal, noise, snr_db):
+                snr_measure_dur = self.cfg.get('snr_measure_dur', 0)
+                if snr_measure_dur > 0:
+                    signal = signal[: (snr_measure_dur * self.cfg.data.train_ds.sample_rate)]
+                    noise = noise[: (snr_measure_dur * self.cfg.data.train_ds.sample_rate)]
                 signal_power = torch.mean(signal**2) + 1e-8
                 noise_power = torch.mean(noise**2) + 1e-8
 
@@ -2643,8 +2613,47 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
                     ),
                 )
                 batch_audio[i] = batch_audio[i] * scaling_factor
-            scaling_factor = get_scale_factor(batch_audio[i], noise_tensor, snr_db)
-            noise_tensor = noise_tensor * scaling_factor
+
+            def get_noise(noise_files):
+
+                noise_path = random.choice(noise_files)
+                noise, sr = sf.read(noise_path, dtype='float32')
+
+                # resample noise from sr to self.cfg.data.train_ds.sample_rate
+                if self.cfg.get('noise_resample', False) and sr != self.cfg.data.train_ds.sample_rate:
+                    noise = librosa.resample(noise, orig_sr=sr, target_sr=self.cfg.data.train_ds.sample_rate)
+
+                if len(noise.shape) > 1:
+                    noise = np.mean(noise, axis=1)
+
+                noise_tensor = torch.tensor(noise, dtype=batch_audio.dtype, device=batch_audio.device)
+                scaling_factor = get_scale_factor(batch_audio[i], noise_tensor, snr_db)
+                noise_tensor = noise_tensor * scaling_factor
+                return noise_tensor
+
+            noise = get_noise(noise_files)
+            noise2 = get_noise(noise_files)
+            noise3 = get_noise(noise_files)
+            if self.cfg.get('debug_noise_audio', False):
+                self.write_wave(
+                    noise,
+                    "/lustre/fsw/portfolios/llmservice/users/zhehuaic/works/mod_speech_llm/tmp/dbg_originalnoise.wav",
+                )
+            noise = torch.cat([noise, noise2, noise3], axis=0)
+
+            if noise.size(0) < audio_length:
+                repeat_times = (audio_length // noise.size(0)) + 1
+                # For a 1D tensor, we want to repeat its elements.
+                # If noise has other dimensions, adjust the repeat_times_tuple accordingly.
+                # e.g., if noise is (C, L), and we want to repeat along L,
+                # repeat_times_tuple = (1, repeat_times)
+                noise = noise.repeat(repeat_times)[:audio_length]
+            else:
+                # If noise is a PyTorch tensor
+                start_idx = torch.randint(0, noise.size(0) - audio_length + 1, (1,)).item()
+                # Or if noise was originally a list/numpy array and you want to keep Python's random
+                # start_idx = random.randint(0, len(noise) - audio_length)
+                noise = noise[start_idx : start_idx + audio_length]
 
             from scipy.signal import butter, lfilter
 
@@ -2670,16 +2679,16 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
                 # Define the desired cutoff frequency (in Hz)
                 cutoff = 1000.0
                 # Apply low-pass filter to the WAV data
-                noise_tensor = lowpass_filter(noise_tensor, cutoff, self.cfg.data.train_ds.sample_rate)
+                noise = lowpass_filter(noise, cutoff, self.cfg.data.train_ds.sample_rate)
 
-            batch_audio[i] = batch_audio[i] + noise_tensor
+            batch_audio[i] = batch_audio[i] + noise
 
         if self.cfg.get('debug_noise_audio', False):
             self.write_wave(
                 batch_audio[0], "/lustre/fsw/portfolios/llmservice/users/zhehuaic/works/mod_speech_llm/tmp/dbg_aug.wav"
             )
             self.write_wave(
-                noise_tensor, "/lustre/fsw/portfolios/llmservice/users/zhehuaic/works/mod_speech_llm/tmp/dbg_noise.wav"
+                noise, "/lustre/fsw/portfolios/llmservice/users/zhehuaic/works/mod_speech_llm/tmp/dbg_noise.wav"
             )
             breakpoint()
         batch['audio_signal'] = batch_audio
