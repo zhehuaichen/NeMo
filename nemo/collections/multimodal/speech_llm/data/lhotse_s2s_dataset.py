@@ -240,6 +240,9 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 is_valid = True
             else:
                 is_valid = False
+            # filter problematic cuts with close to empty transcriptions
+            if len((" ".join([sup.text for sup in cut.supervisions])).split()) < len(cut.supervisions):
+                is_valid = False
             for id, sup in enumerate(cut.supervisions):
                 if id % 2 == 0:
                     if sup.speaker.lower() != "user":
