@@ -2388,19 +2388,21 @@ class S2sModularAudioGPTModelSpeechDecoder(ModularAudioGPTModel):
                 )
             else:
                 raise ValueError("scale_loss_mask_by=bos_eos is only supported for target_texts_merge")
-        elif scale_loss_mask_by == 'non_sil_t_bos_eos':
+        elif scale_loss_mask_by == 'non_sil_t_bos_eos' or scale_loss_mask_by == 'non_sil_t_bos_eos_synth':
             if 'target_texts_merge' in audio_batch:
                 loss_mask[:, :, :1] = torch.where(
                     labels[:, :, :1] != labels[i, :1, :1], self.cfg.get("scale_loss_mask", 4.0), loss_mask[:, :, :1]
                 )
                 text_channel = audio_batch['target_texts_merge'][i]
                 sliced_text_channel = text_channel[: loss_mask.shape[1]].unsqueeze(-1)
-                loss_mask = torch.where(
-                    sliced_text_channel == self.tokenizer.bos_id, self.cfg.get("scale_loss_mask2", 8.0), loss_mask
-                )
-                loss_mask = torch.where(
-                    sliced_text_channel == self.tokenizer.eos_id, self.cfg.get("scale_loss_mask2", 8.0), loss_mask
-                )
+                # exclude as sometime timestamp in real data is not precise
+                if scale_loss_mask_by != 'non_sil_t_bos_eos_synth' or 's2s_duplex_overlap' not in audio_batch:
+                    loss_mask = torch.where(
+                        sliced_text_channel == self.tokenizer.bos_id, self.cfg.get("scale_loss_mask2", 8.0), loss_mask
+                    )
+                    loss_mask = torch.where(
+                        sliced_text_channel == self.tokenizer.eos_id, self.cfg.get("scale_loss_mask2", 8.0), loss_mask
+                    )
             else:
                 raise ValueError("scale_loss_mask_by=bos_eos is only supported for target_texts_merge")
         elif scale_loss_mask_by == 'dynamic_text_non_sil_and_bos_eos':

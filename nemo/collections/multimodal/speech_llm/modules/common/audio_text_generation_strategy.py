@@ -323,6 +323,12 @@ class AudioToAudioGenerationStrategy(AudioToTextGenerationStrategy):
                 self.model.cfg.speech_eos_id,
                 tokens[:, -1, 1:],
             )
+        if self.model.get_inference_config().get('force_pad_after_eos', None):
+            tokens[:, -1, :1] = torch.where(
+                ((tokens[:, -2, :1] == self.model.tokenizer.eos_id)),
+                self.model.tokenizer.unk_id,
+                tokens[:, -1, :1],
+            )
 
         return speech_done_token
 
