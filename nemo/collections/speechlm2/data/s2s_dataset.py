@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+import random
 
 import torch
 import torch.utils.data
@@ -90,6 +91,7 @@ class DuplexS2SDataset(torch.utils.data.Dataset):
         target_sample_rate: int,
         input_roles: list[str] = None,
         output_roles: list[str] = None,
+        collate_source_type: list[str] = None,
     ):
         self.tokenizer = tokenizer
         self.frame_length = frame_length
@@ -97,6 +99,7 @@ class DuplexS2SDataset(torch.utils.data.Dataset):
         self.target_sample_rate = target_sample_rate
         self.input_roles = set(ifnone(input_roles, ["user"]))
         self.output_roles = set(ifnone(output_roles, ["agent"]))
+        self.collate_source_type = collate_source_type
         
         assert tokenizer.bos is not None, "BOS support in the tokenizer is required for S2S models."
         assert tokenizer.eos is not None, "EOS support in the tokenizer is required for S2S models."
@@ -111,9 +114,17 @@ class DuplexS2SDataset(torch.utils.data.Dataset):
         target_tokens, target_token_lens = collate_token_channel(
             cuts, self.tokenizer, self.frame_length, roles=self.output_roles
         )
-        source_tokens, source_token_lens = collate_token_channel(
-            cuts, self.tokenizer, self.frame_length, roles=self.input_roles
-        )
+        if self.collate_source_type is None:
+            source_tokens, source_token_lens = collate_token_channel(
+                cuts, self.tokenizer, self.frame_length, roles=self.input_roles
+            )
+        elif self.collate_source_type == "interleaved_v1":
+            source_tokens, source_token_lens = collate_token_channel_interleaved(
+                cuts, self.tokenizer, self.frame_length, roles=self.input_roles
+            )
+        else:
+            raise ValueError(f"Unknown collate_source_type: {self.collate_source_type}. ")
+
         # extract target speaker first turn audio to uses for speaker conditioning
         target_first_turn_audio, target_first_turn_audio_lens = collate_first_turn_audio(
             cuts.resample(self.target_sample_rate), roles=self.output_roles, recording_field="target_audio"
@@ -169,6 +180,95 @@ def collate_token_channel(
     tokens = collate_vectors(tokens, padding_value=pad_id)
     return tokens, token_lens
 
+def collate_token_channel_interleaved(
+    cuts: CutSet,
+    tokenizer: TokenizerSpec,
+    frame_length: Seconds,
+    roles: set[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pad_id = get_pad_id(tokenizer)
+    tokens = [
+        build_token_channel_interleaved(c, tokenizer=tokenizer, frame_length=frame_length, roles=roles, pad_id=pad_id)
+        for c in cuts
+    ]
+    token_lens = torch.tensor([len(tt) for tt in tokens])
+    tokens = collate_vectors(tokens, padding_value=pad_id)
+
+    return tokens, token_lens
+
+
+def build_token_channel_interleaved(
+    cut: Cut,
+    tokenizer: TokenizerSpec,
+    frame_length: Seconds,
+    roles: set[str],
+    pad_id: int = -1,
+) -> torch.Tensor:
+    diagnostic = f"Extra info: {cut.id=}"
+    if getattr(cut, "shard_origin", None) is not None:
+        diagnostic = f"{diagnostic} {cut.shard_origin=}"
+
+    total = compute_num_frames(cut.duration, frame_length, cut.sampling_rate)
+    tokens = torch.ones(total, dtype=torch.long) * pad_id
+    for supervision in cut.supervisions:
+        if supervision.speaker in roles:
+            text_ids = torch.as_tensor([tokenizer.bos] + tokenizer.text_to_ids(supervision.text))
+
+            # Determine the frame offset for the start of the supervision to insert the text tokens.
+            pos = compute_num_frames(supervision.start, frame_length, cut.sampling_rate)
+            if pos > len(tokens):
+                logging.warning(
+                    f"Ill-constructed example: the beginning offset of a supervision {pos} is larger than the example's length {len(tokens)}. {diagnostic}"
+                )
+                continue
+
+            # Calculate the original turn length (same as before)
+            eospos = compute_num_frames(supervision.end, frame_length, cut.sampling_rate)
+            turn_length = min(eospos - pos, len(tokens) - pos)  # Available space for this turn
+            
+            if turn_length <= 0:
+                continue
+                
+            # Add random pad tokens within text_ids
+            # Calculate maximum number of pads we can add without exceeding turn_length
+            max_pads_possible = turn_length - len(text_ids)
+            if max_pads_possible <= 0:
+                # If text_ids already fills or exceeds turn_length, truncate and don't add pads
+                expanded_text_ids = text_ids[:turn_length]
+            else:
+                # Determine how many pad tokens to add (10-30% of text length, but capped by available space)
+                desired_pads = random.randint(len(text_ids) // 10, len(text_ids) // 3)
+                num_pads_to_add = min(desired_pads, max_pads_possible)
+                
+                # Create expanded text_ids with random pad tokens inserted
+                expanded_text_ids = list(text_ids)
+                for _ in range(num_pads_to_add):
+                    # Insert pad_id at random positions (not at the very beginning to preserve BOS)
+                    insert_pos = random.randint(1, len(expanded_text_ids))
+                    expanded_text_ids.insert(insert_pos, pad_id)
+                
+                expanded_text_ids = torch.tensor(expanded_text_ids, dtype=torch.long)
+            
+            # At this point, expanded_text_ids should never exceed turn_length
+            assert len(expanded_text_ids) <= turn_length, f"expanded_text_ids length {len(expanded_text_ids)} exceeds turn_length {turn_length}"
+            
+            # Fill the turn with the expanded text_ids, pad the rest with pad_id
+            endpos = pos + len(expanded_text_ids)
+            try:
+                tokens[pos:endpos] = expanded_text_ids
+                # Fill remaining space in the turn with pad_id (if any)
+                if endpos < pos + turn_length:
+                    tokens[endpos:pos + turn_length] = pad_id
+            except Exception as e:
+                raise RuntimeError(f"{tokens.shape=} {pos=} {endpos=} {expanded_text_ids.shape=} {diagnostic}") from e
+            
+            # No EOS token to match the output tokens of of ASR decoder
+            # # Insert EOS at the end of the supervision segment.
+            # eospos = compute_num_frames(supervision.end, frame_length, cut.sampling_rate)
+            # if eospos < len(tokens):  # skip otherwise - unfinished turn
+            #     tokens[eospos] = tokenizer.eos
+
+    return tokens
 
 def build_token_channel(
     cut: Cut,
