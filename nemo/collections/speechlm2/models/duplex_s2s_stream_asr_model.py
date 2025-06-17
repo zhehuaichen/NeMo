@@ -17,16 +17,14 @@ from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    loss_parallel,
-    parallelize_module,
-)
+from torch.distributed.tensor.parallel import ColwiseParallel, loss_parallel, parallelize_module
 from transformers import DynamicCache
 
 from nemo.collections.audio.parts.utils.resampling import resample
 from nemo.collections.speechlm2.models.duplex_s2s_model import replace_control_speech_codes, tokens_to_str
-from nemo.collections.speechlm2.models.duplex_s2s_speech_decoder_model import DuplexS2SSpeechDecoderModel # Import parent class
+from nemo.collections.speechlm2.models.duplex_s2s_speech_decoder_model import (
+    DuplexS2SSpeechDecoderModel,  # Import parent class
+)
 from nemo.collections.speechlm2.modules import TransformerARSpeechDecoder
 from nemo.collections.speechlm2.parts.metrics.asr_bleu import ASRBLEU
 from nemo.collections.speechlm2.parts.metrics.bleu import BLEU
@@ -47,34 +45,36 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
         """
 
         inputs = super().prepare_inputs(batch)  # Call parent to set up basic inputs
-        inputs_t2t = self.prepare_t2t_inputs(batch)  # Prepare T2T specific inputs
+        inputs_t2t = self.prepare_t2t_inputs(batch, inputs)  # Prepare T2T specific inputs
         inputs.update(inputs_t2t)
         return inputs
 
-    def prepare_t2t_inputs(self, batch: dict):
+    def prepare_t2t_inputs(self, batch: dict, inputs: dict):
         """
         Prepare inputs for text-to-text processing.
         """
         source_tokens = batch["source_tokens"]
         target_tokens = batch["target_tokens"]
-        
+
         # For T2T, typically input is source, label is target.
         # Autoregressive: input is target_shifted_right, label is target.
         # Here, it seems to combine source and target for input.
-        
+
         # Assuming standard autoregressive T2T: input is target[:, :-1], labels are target[:, 1:]
         # And source_tokens are used to condition.
-        
-        text_inputs = target_tokens[:, :-1]
-        
+
+        text_inputs = target_tokens[
+            :, : inputs["input_audio_tokens"].shape[1]
+        ]  # Align text inputs with audio tokens length
+
         agent_embeds = self.embed_tokens(text_inputs)
-        
+
         # Align source_tokens with text_inputs length for combination
-        source_tokens_aligned = source_tokens[:, :text_inputs.shape[1]]
+        source_tokens_aligned = source_tokens[:, : text_inputs.shape[1]]
         user_embeds = self.embed_tokens(source_tokens_aligned)
-        
+
         input_embeds = self._combine_embeddings(agent_embeds, user_embeds)
-        
+
         return {
             "input_embeds": input_embeds,
         }
@@ -94,11 +94,11 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
     def _combine_embeddings(self, agent_embeds: Tensor, user_embeds: Tensor) -> Tensor:
         """
         Combine agent and user embeddings based on the configuration.
-        
+
         Args:
             agent_embeds: Agent (target) embeddings of shape (B, T, H)
             user_embeds: User (source) embeddings of shape (B, T, H)
-            
+
         Returns:
             Combined embeddings of shape (B, T, H)
         """
@@ -115,7 +115,9 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
 
         # Update speaker embedding to reflect the one in the prompt during inference
         if self.speech_generation.use_speaker_encoder and self.speech_generation.inference_speaker_reference:
-            self.speech_generation.update_inference_speaker_embedding(self.speech_generation.inference_speaker_reference)
+            self.speech_generation.update_inference_speaker_embedding(
+                self.speech_generation.inference_speaker_reference
+            )
 
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
@@ -123,9 +125,9 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
 
             results = self.offline_t2t_inference(
                 dataset_batch["source_tokens"],
-                dataset_batch["source_tokens_len"],
+                dataset_batch["source_token_lens"],
             )
-            #TODO: add speech generation and then call asr_bleu
+            # TODO: add speech generation and then call asr_bleu
 
             with fp32_precision():  # resample is fragile to bfloat16 default dtype
                 '''asr_hyps = self.asr_bleu.update(
@@ -162,40 +164,55 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
         Autoregressive text-to-text prediction.
         """
         B, T_src = source_tokens.shape
-        
+
         source_embeds = self.embed_tokens(source_tokens)
-        
+
         # Max generation length, e.g., same as source or a config param.
         # For simplicity, T_gen = T_src. Add EOS handling for variable length.
-        T_gen = T_src 
-        
+        T_gen = T_src
+
         cache = DynamicCache()
         gen_tokens = torch.empty(B, T_gen, device=self.device, dtype=torch.long)
-        
+
         # First step: agent is BOS, user is first source token embedding
         current_agent_embedding = self._get_bos_embedding().expand(B, 1, -1)
 
         for t in range(T_gen):
             current_source_embedding_idx = min(t, T_src - 1)
-            current_source_embed = source_embeds[:, current_source_embedding_idx:current_source_embedding_idx+1]
-            
+            current_source_embed = source_embeds[:, current_source_embedding_idx : current_source_embedding_idx + 1]
+
             step_embeds = self._combine_embeddings(current_agent_embedding, current_source_embed)
-            
+
             # Pass cache from previous step if t > 0
-            current_cache = ans.get("cache") if t > 0 else cache 
-            ans = self(step_embeds, cache=current_cache) 
-            
+            current_cache = ans.get("cache") if t > 0 else cache
+            ans = self(step_embeds, cache=current_cache)
+
             predicted_token = ans["text_logits"][:, -1].argmax(dim=-1)
             gen_tokens[:, t] = predicted_token
-            
+
             current_agent_embedding = self.embed_tokens(predicted_token.unsqueeze(1))
 
             # TODO: EOS handling to stop generation and adjust generated_lens
-        
-        generated_lens = source_lens.clone() # Placeholder
+
+        generated_lens = source_lens.clone()  # Placeholder
 
         return {
             "text": tokens_to_str(gen_tokens, generated_lens, tokenizer=self.tokenizer, pad_id=self.text_pad_id),
             "tokens": gen_tokens,
+            "tokens_text": gen_tokens,
             "tokens_len": generated_lens,
         }
+
+    def on_validation_epoch_end(self, prefix="val") -> None:
+        '''asr_bleu = self.asr_bleu.compute()
+        for k, m in asr_bleu.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)'''
+        bleu = self.bleu.compute()
+        for k, m in bleu.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
+        text_bos_acc = self.text_bos_acc.compute()
+        for k, m in text_bos_acc.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)
+        text_eos_acc = self.text_eos_acc.compute()
+        for k, m in text_eos_acc.items():
+            self.log(f"{prefix}_{k}", m.to(self.device), on_epoch=True, sync_dist=True)

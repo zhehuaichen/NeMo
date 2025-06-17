@@ -12,14 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import torch
 import random
+import tempfile
+
+import torch
 import torch.distributed as dist
+import torchaudio
 from lightning import LightningModule
 from omegaconf import DictConfig, OmegaConf
 from peft import PeftModel
 from torch import Tensor
-import torchaudio
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -30,11 +32,11 @@ from torch.distributed.tensor.parallel import (
     loss_parallel,
     parallelize_module,
 )
-import tempfile
 from transformers import DynamicCache
 
 from nemo.collections.audio.parts.utils.resampling import resample
 from nemo.collections.common.tokenizers import AutoTokenizer
+from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.speechlm2.data.utils import get_pad_id
 from nemo.collections.speechlm2.models.duplex_s2s_model import replace_control_speech_codes, tokens_to_str
 from nemo.collections.speechlm2.modules import TransformerARSpeechDecoder
@@ -42,13 +44,17 @@ from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
 from nemo.collections.speechlm2.parts.lora import maybe_install_lora
 from nemo.collections.speechlm2.parts.metrics.asr_bleu import ASRBLEU
 from nemo.collections.speechlm2.parts.metrics.bleu import BLEU
-from nemo.collections.speechlm2.parts.metrics.token_accuracy import TokenAccuracy
 from nemo.collections.speechlm2.parts.metrics.results_logger import ResultsLogger
+from nemo.collections.speechlm2.parts.metrics.token_accuracy import TokenAccuracy
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
 from nemo.collections.speechlm2.parts.precision import fp32_precision
-from nemo.collections.speechlm2.parts.pretrained import load_pretrained_hf, setup_audio_codec, setup_speech_encoder, set_model_dict_for_partial_init
+from nemo.collections.speechlm2.parts.pretrained import (
+    load_pretrained_hf,
+    set_model_dict_for_partial_init,
+    setup_audio_codec,
+    setup_speech_encoder,
+)
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralType
-from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.utils import logging
 
 
@@ -71,7 +77,9 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         self.advance_text_channel_by = self.cfg.get("advance_text_channel_by", None)
 
         # compute source fps
-        self.source_fps = self.source_sample_rate / (self.source_sample_rate * cfg.data.frame_length) # conver frame rate in fps
+        self.source_fps = self.source_sample_rate / (
+            self.source_sample_rate * cfg.data.frame_length
+        )  # conver frame rate in fps
 
         setup_audio_codec(self)
         self._codebook_size = self.audio_codec.vector_quantizer.codebook_size_per_group
@@ -83,7 +91,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
 
         # compute target fps
         self.target_fps = self.target_sample_rate / self.audio_codec.samples_per_frame
-        # compute interpolation factor to interpolate 
+        # compute interpolation factor to interpolate
         self.interpolation_factor = self.target_fps / self.source_fps
         # x = torch.nn.functional.interpolate(x.unsqueeze(1), size=None, scale_factor=[1, self.interpolation_factor], mode='nearest-exact', align_corners=None, recompute_scale_factor=None, antialias=False)
 
@@ -104,13 +112,15 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         # Load the pretrained streaming ASR model and copy its parameters into the audio perception module.
         setup_speech_encoder(self)
 
-
         llm_tokenizer_vocab_items = self.tokenizer.vocab
         # if vocab is a dict it already has the subword and token id, if not, get it from the tokenizer
         if isinstance(llm_tokenizer_vocab_items, dict):
             llm_tokenizer_vocab_items = llm_tokenizer_vocab_items.items()
         else:
-            llm_tokenizer_vocab_items = [(subword, self.tokenizer.tokenizer._tokenizer.token_to_id(subword)) for subword in llm_tokenizer_vocab_items]
+            llm_tokenizer_vocab_items = [
+                (subword, self.tokenizer.tokenizer._tokenizer.token_to_id(subword))
+                for subword in llm_tokenizer_vocab_items
+            ]
 
         self.speech_generation = TransformerARSpeechDecoder(
             speech_decoder_parms=OmegaConf.to_container(self.cfg.speech_decoder),
@@ -150,10 +160,10 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
     def init_speech_generation_from_tts_checkpoint(self, checkpoint_path):
         if checkpoint_path is not None:
             if '.nemo' in checkpoint_path:
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
-                        checkpoint_path = f"{tmpdir}/model_weights.ckpt"
-                        checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
+                    checkpoint_path = f"{tmpdir}/model_weights.ckpt"
+                    checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
             else:
                 checkpoint_state = torch.load(checkpoint_path, weights_only=False, map_location='cpu')['state_dict']
 
@@ -163,25 +173,29 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
     def init_speech_generation_from_another_s2s_checkpoint(self, checkpoint_path):
         if checkpoint_path is not None:
             if '.nemo' in checkpoint_path:
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
-                        checkpoint_path = f"{tmpdir}/model_weights.ckpt"
-                        checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
+                    checkpoint_path = f"{tmpdir}/model_weights.ckpt"
+                    checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
             else:
                 checkpoint_state = torch.load(checkpoint_path, weights_only=False, map_location='cpu')['state_dict']
 
             # filter keys to keep only speech generation keys and also
-            checkpoint_state = {k.replace("model.speech_decoder.", "").replace("speech_generation.", ""): v for k, v in checkpoint_state.items() if "model.speech_decoder." in k or "speech_generation." in k}
+            checkpoint_state = {
+                k.replace("model.speech_decoder.", "").replace("speech_generation.", ""): v
+                for k, v in checkpoint_state.items()
+                if "model.speech_decoder." in k or "speech_generation." in k
+            }
             checkpoint_state = set_model_dict_for_partial_init(checkpoint_state, self.speech_generation.state_dict())
             self.speech_generation.load_state_dict(checkpoint_state, strict=True)
 
     def init_from_model_from_ckpt(self, checkpoint_path):
         if checkpoint_path is not None:
             if '.nemo' in checkpoint_path:
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
-                        checkpoint_path = f"{tmpdir}/model_weights.ckpt"
-                        checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    NLPSaveRestoreConnector._unpack_nemo_file(checkpoint_path, tmpdir)
+                    checkpoint_path = f"{tmpdir}/model_weights.ckpt"
+                    checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
             else:
                 checkpoint_state = torch.load(checkpoint_path, weights_only=False, map_location='cpu')['state_dict']
 
@@ -246,7 +260,17 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         """
         return get_pad_id(self.tokenizer)
 
-    def forward(self, input_embeds: Tensor, cache=None, input_audio_tokens=None, seq_mask=None, target_text_tokens=None, modality_adapter_emb=None, asr_emb=None, speaker_encoder_emb=None) -> dict[str, Tensor]:
+    def forward(
+        self,
+        input_embeds: Tensor,
+        cache=None,
+        input_audio_tokens=None,
+        seq_mask=None,
+        target_text_tokens=None,
+        modality_adapter_emb=None,
+        asr_emb=None,
+        speaker_encoder_emb=None,
+    ) -> dict[str, Tensor]:
         """
         Separated text and speech prediction:
             - Speech prediction is achieved by a independent AR decoder based on last_hidden_state + audio tokens
@@ -272,29 +296,47 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         if self.speech_generation.use_input_cache and not self.training:
             target_text_tokens = torch.argmax(text_logits, dim=-1).view(B, T).contiguous()
 
-        audio_logits, _  = self.speech_generation(
-            out['last_hidden_state'].transpose(0, 1), seq_mask, input_audio_tokens=input_audio_tokens, target_text_tokens=target_text_tokens, modality_adapter_emb=modality_adapter_emb, asr_emb=asr_emb, speaker_encoder_emb=speaker_encoder_emb
-        )
-
-        audio_logits = audio_logits.view(B, T, self._num_codebooks, self.speech_vocab_size)
-
         ans = {
             "text_logits": text_logits,
-            "audio_logits": audio_logits,
         }
+        if input_audio_tokens is not None:
+            audio_logits, _ = self.speech_generation(
+                out['last_hidden_state'].transpose(0, 1),
+                seq_mask,
+                input_audio_tokens=input_audio_tokens,
+                target_text_tokens=target_text_tokens,
+                modality_adapter_emb=modality_adapter_emb,
+                asr_emb=asr_emb,
+                speaker_encoder_emb=speaker_encoder_emb,
+            )
+
+            audio_logits = audio_logits.view(B, T, self._num_codebooks, self.speech_vocab_size)
+            ans["audio_logits"] = audio_logits
+
         if cache is not None:
             ans["cache"] = out["past_key_values"]
         return ans
 
-
-    def add_noise_to_batch(self, batch_audio, noise_folder, snr_db=20, noise_prob_scale_user=0.3, noise_prob_scale_user_min_snr=-15, noise_prob_scale_user_max_snr=24, snr_measure_dur=0.0, noise_resample=True, noise_prob_low_pass=0.1):
+    def add_noise_to_batch(
+        self,
+        batch_audio,
+        noise_folder,
+        snr_db=20,
+        noise_prob_scale_user=0.3,
+        noise_prob_scale_user_min_snr=-15,
+        noise_prob_scale_user_max_snr=24,
+        snr_measure_dur=0.0,
+        noise_resample=True,
+        noise_prob_low_pass=0.1,
+    ):
 
         batch_size, audio_length = batch_audio.shape
 
         import glob
+
+        import librosa
         import soundfile as sf
         from scipy.signal import butter, lfilter
-        import librosa
 
         noise_files = [f for f in glob.glob(noise_folder + "/*.wav")]
         if not noise_files:
@@ -317,10 +359,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 scaling_factor = get_scale_factor(
                     batch_audio[i],
                     batch_audio[i],
-                    random.randint(
-                        noise_prob_scale_user_min_snr,
-                        noise_prob_scale_user_max_snr
-                    ),
+                    random.randint(noise_prob_scale_user_min_snr, noise_prob_scale_user_max_snr),
                 )
                 batch_audio[i] = batch_audio[i] * scaling_factor
 
@@ -359,7 +398,6 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 # Or if noise was originally a list/numpy array and you want to keep Python's random
                 # start_idx = random.randint(0, len(noise) - audio_length)
                 noise = noise[start_idx : start_idx + audio_length]
-
 
             # Function to create a low-pass filter
             def butter_lowpass(cutoff, fs, order=5):
@@ -407,17 +445,36 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
             noise_path = "/lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/dns5/dns5_demand_noise/"
             noise_path_name = "*"
             no_noise_audio = batch["source_audio"].clone()
-            if self.training and 's2s_duplex_overlap_as_s2s_duplex' not in batch["formatter"] and noise_prob and random.random() < noise_prob:
-                batch["source_audio"] = self.add_noise_to_batch(batch["source_audio"], os.path.join(noise_path, noise_path_name), snr_db=random.randint(noise_min_snr, noise_max_snr), noise_prob_scale_user=0.3, noise_prob_scale_user_min_snr=-15, noise_prob_scale_user_max_snr=24, snr_measure_dur=0.0, noise_resample=True, noise_prob_low_pass=0.1)
+            if (
+                self.training
+                and 's2s_duplex_overlap_as_s2s_duplex' not in batch["formatter"]
+                and noise_prob
+                and random.random() < noise_prob
+            ):
+                batch["source_audio"] = self.add_noise_to_batch(
+                    batch["source_audio"],
+                    os.path.join(noise_path, noise_path_name),
+                    snr_db=random.randint(noise_min_snr, noise_max_snr),
+                    noise_prob_scale_user=0.3,
+                    noise_prob_scale_user_min_snr=-15,
+                    noise_prob_scale_user_max_snr=24,
+                    snr_measure_dur=0.0,
+                    noise_resample=True,
+                    noise_prob_low_pass=0.1,
+                )
         else:
             # change audio volume randomly
             if self.training and random.random() < self.cfg.get('noise_prob_scale_user', 0.0):
                 # prev codebase had 0.0631 and 5.6234 here we round the values
-                min_scale_val = self.cfg.get('noise_scale_user_min', 0.0631) # -15 snr
-                max_scale_val = self.cfg.get('noise_scale_user_min', 5.6234) # 24 snr
+                min_scale_val = self.cfg.get('noise_scale_user_min', 0.0631)  # -15 snr
+                max_scale_val = self.cfg.get('noise_scale_user_min', 5.6234)  # 24 snr
 
                 # get a random float value between min and max
-                scaling_factor = torch.rand(batch["source_audio"].size(0), device=batch["source_audio"].device) * (max_scale_val - min_scale_val) + min_scale_val
+                scaling_factor = (
+                    torch.rand(batch["source_audio"].size(0), device=batch["source_audio"].device)
+                    * (max_scale_val - min_scale_val)
+                    + min_scale_val
+                )
                 batch["source_audio"] = batch["source_audio"] * scaling_factor.unsqueeze(-1)
 
             # apply low pass filter
@@ -425,21 +482,26 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 # prev codebase had 0.0631 and 5.6234 here we round the values
                 cutoff_freq = self.cfg.get('noise_low_pass_cutoff_freq', 1000.0)
                 # note here we are using a biquad filter, older codebase we are using a filter of order 5
-                batch["source_audio"] = torchaudio.functional.lowpass_biquad(waveform=batch["source_audio"], sample_rate=self.source_sample_rate, cutoff_freq=cutoff_freq)
-
+                batch["source_audio"] = torchaudio.functional.lowpass_biquad(
+                    waveform=batch["source_audio"], sample_rate=self.source_sample_rate, cutoff_freq=cutoff_freq
+                )
 
         source_encoded, source_encoded_lens, asr_emb = self.perception(
-            input_signal=batch["source_audio"], input_signal_length=batch["source_audio_lens"], return_encoder_emb=True,
+            input_signal=batch["source_audio"],
+            input_signal_length=batch["source_audio_lens"],
+            return_encoder_emb=True,
         )
 
         # if inference return speaker embedding None and it will uses the cached speaker embedding
         if not self.training:
             speaker_encoder_emb = None
-        else: # if training or eval extract embedding from first agent turn returned by the dataloader 
+        else:  # if training or eval extract embedding from first agent turn returned by the dataloader
             if self.speech_generation.use_speaker_encoder:
                 target_first_turn_audio = batch["target_first_turn_audio"]
                 target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
-                speaker_encoder_emb = self.speech_generation.get_speaker_embedding(target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate)
+                speaker_encoder_emb = self.speech_generation.get_speaker_embedding(
+                    target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
+                )
             else:
                 speaker_encoder_emb = None
 
@@ -502,11 +564,11 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         if self.advance_text_channel_by:
             pad = torch.full(
                 (target_tokens.shape[0], self.advance_text_channel_by),
-                fill_value=self.text_pad_id, 
+                fill_value=self.text_pad_id,
                 device=target_tokens.device,
                 dtype=torch.long,
             )
-            target_tokens = torch.cat([target_tokens[:, self.advance_text_channel_by:], pad], dim=-1)
+            target_tokens = torch.cat([target_tokens[:, self.advance_text_channel_by :], pad], dim=-1)
 
         input_ids = torch.cat([target_codes, target_tokens[..., None]], dim=-1)
         if self._use_tp:
@@ -520,7 +582,6 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         text_labels = input_ids[:, 1:, -1]  # (B, T-1)
         audio_inputs = input_ids[:, :-1, :-1]  # (B, T-1, K)
         audio_labels = input_ids[:, 1:, :-1]  # (B, T-1, K)
-
 
         input_embeds = self.embed_tokens(text_inputs)
 
@@ -551,7 +612,9 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
 
         if self.cfg.get("scale_loss_by", None):
             if self.cfg.scale_loss_by == 'non_sil_t':
-                loss_scale[:, :, :1] = torch.where(text_labels.unsqueeze(-1) != self.text_pad_id, 4.0, loss_scale[:, :, :1])
+                loss_scale[:, :, :1] = torch.where(
+                    text_labels.unsqueeze(-1) != self.text_pad_id, 4.0, loss_scale[:, :, :1]
+                )
             elif self.cfg.scale_loss_by == 'dynamic_text_non_sil_4x_and_bos_eos':
                 # Set text loss weights
                 for i in range(text_labels.size(0)):
@@ -575,15 +638,22 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 loss_scale[:, :, :1] = torch.where(labels == self.text_bos_id, 6.0, loss_scale[:, :, :1])
                 loss_scale[:, :, :1] = torch.where(labels == self.text_eos_id, 6.0, loss_scale[:, :, :1])
             elif self.cfg.scale_loss_by == 'non_sil_4_eos_bos_12':
-                loss_scale[:, :, :1] = torch.where(text_labels.unsqueeze(-1) != self.text_pad_id, 4.0, loss_scale[:, :, :1])
+                loss_scale[:, :, :1] = torch.where(
+                    text_labels.unsqueeze(-1) != self.text_pad_id, 4.0, loss_scale[:, :, :1]
+                )
                 # set eos/bos 3x more important than a speech tokens and 12x more than a silence, this is that high because we will have only one bos/eos per turn and if it is nor right predicted the model will not produce text/speech
-                loss_scale[:, :, :1] = torch.where(text_labels.unsqueeze(-1) == self.text_bos_id, 12.0, loss_scale[:, :, :1])
-                loss_scale[:, :, :1] = torch.where(text_labels.unsqueeze(-1) == self.text_eos_id, 12.0, loss_scale[:, :, :1])
+                loss_scale[:, :, :1] = torch.where(
+                    text_labels.unsqueeze(-1) == self.text_bos_id, 12.0, loss_scale[:, :, :1]
+                )
+                loss_scale[:, :, :1] = torch.where(
+                    text_labels.unsqueeze(-1) == self.text_eos_id, 12.0, loss_scale[:, :, :1]
+                )
             else:
                 raise ValueError(f"Unknown scale_loss_by: {self.cfg.scale_loss_by}")
 
         # debug samples:
         if self.cfg.get("debug_dataloader_audios_path", None) and self.training:
+
             def count_leading_silence_tokens(tensor: torch.Tensor, silence_token: int = 0) -> int:
                 """
                 Count the number of consecutive silence tokens at the beginning of a 1D tensor.
@@ -605,24 +675,30 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                     else:
                         break
                 return count
+
             def write_wave(one_audio_signal, file_name, sr=None):
                 import numpy as np
                 import soundfile as sf
+
                 one_audio_signal = one_audio_signal.cpu().numpy()
                 one_audio_signal = one_audio_signal.astype(np.float32)
                 if sr is None:
                     sr = self.target_sample_rate
                 # one_audio_signal = np.clip(one_audio_signal, -1.0, 1.0)
-                sf.write(file_name, one_audio_signal, sr)    
+                sf.write(file_name, one_audio_signal, sr)
 
             # encode and decode the audio
             with fp32_precision(), torch.no_grad():
-                lengths = torch.tensor([batch["target_audio"].shape[1]]*batch["target_audio"].shape[0]).to(self.audio_codec.device)
+                lengths = torch.tensor([batch["target_audio"].shape[1]] * batch["target_audio"].shape[0]).to(
+                    self.audio_codec.device
+                )
                 reconstructed_audio_from_wav, _ = self.audio_codec(audio=batch["target_audio"], audio_len=lengths)
                 # reconstruct wav
                 audio_labels_ = replace_control_speech_codes(audio_labels, self._control_codes)
                 with fp32_precision(), torch.no_grad():
-                    lengths = torch.tensor([audio_labels_.shape[1]]*audio_labels_.shape[0]).to(self.audio_codec.device)
+                    lengths = torch.tensor([audio_labels_.shape[1]] * audio_labels_.shape[0]).to(
+                        self.audio_codec.device
+                    )
                     reconstructed_audio_from_tokens, _ = self.audio_codec.decode(
                         tokens=audio_labels_.transpose(1, 2), tokens_len=lengths
                     )
@@ -631,35 +707,56 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 write_wave(
                     batch["target_audio"][i],
                     os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"target_audio_{i}.wav"),
-                    sr=self.target_sample_rate
+                    sr=self.target_sample_rate,
                 )
                 write_wave(
                     batch["target_first_turn_audio"][i],
                     os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"speaker_ref_{i}.wav"),
-                    sr=self.target_sample_rate
+                    sr=self.target_sample_rate,
                 )
                 write_wave(
                     batch["source_audio"][i],
                     os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"source_audio_{i}.wav"),
-                    sr=self.source_sample_rate
+                    sr=self.source_sample_rate,
                 )
-                
+
                 write_wave(
                     reconstructed_audio_from_tokens[i],
-                    os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"target_audio_reconstructed_from_tokens_{i}.wav"),
-                    sr=self.target_sample_rate
+                    os.path.join(
+                        self.cfg.get("debug_dataloader_audios_path"), f"target_audio_reconstructed_from_tokens_{i}.wav"
+                    ),
+                    sr=self.target_sample_rate,
                 )
 
                 write_wave(
                     reconstructed_audio_from_wav[i],
-                    os.path.join(self.cfg.get("debug_dataloader_audios_path"), f"target_audio_reconstructed_from_waveform_{i}.wav"),
-                    sr=self.target_sample_rate
+                    os.path.join(
+                        self.cfg.get("debug_dataloader_audios_path"),
+                        f"target_audio_reconstructed_from_waveform_{i}.wav",
+                    ),
+                    sr=self.target_sample_rate,
                 )
 
             # check text
-            print("text_labels decoded:", tokens_to_str(text_labels[-1:], target_codes_lens-1, tokenizer=self.tokenizer, pad_id=self.text_pad_id))
-            print("target labels from dataloader decoded:",  tokens_to_str(batch["target_tokens"][-1:], target_codes_lens-1, tokenizer=self.tokenizer, pad_id=self.text_pad_id))
-            print("Number of padding tokens on the begining:", count_leading_silence_tokens(text_labels[-1:].squeeze(), self.text_pad_id))
+            print(
+                "text_labels decoded:",
+                tokens_to_str(
+                    text_labels[-1:], target_codes_lens - 1, tokenizer=self.tokenizer, pad_id=self.text_pad_id
+                ),
+            )
+            print(
+                "target labels from dataloader decoded:",
+                tokens_to_str(
+                    batch["target_tokens"][-1:],
+                    target_codes_lens - 1,
+                    tokenizer=self.tokenizer,
+                    pad_id=self.text_pad_id,
+                ),
+            )
+            print(
+                "Number of padding tokens on the begining:",
+                count_leading_silence_tokens(text_labels[-1:].squeeze(), self.text_pad_id),
+            )
             print(batch["formatter"])
             exit()
 
@@ -681,9 +778,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         if not hasattr(self, "_param_tracker_state"):
             # First-time call: cache current weights
             self._param_tracker_state = {
-                name: p.clone().detach()
-                for name, p in self.named_parameters()
-                if param_filter in name
+                name: p.clone().detach() for name, p in self.named_parameters() if param_filter in name
             }
             if verbose:
                 print(f"[Tracker] Initialized snapshot for: {[k for k in self._param_tracker_state]}")
@@ -712,7 +807,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         for m in (self.perception.preprocessor, self.perception.encoder, self.llm, self.speech_generation):
             if is_frozen(m):
                 m.eval()
-        
+
         # self.track_param_updates("speech_generation.")
 
         inputs = self.prepare_inputs(batch)
@@ -733,13 +828,13 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 text_logits = text_logits * inputs["seq_mask"][:, :, 0].unsqueeze(-1)
 
             text_loss = (
-                (torch.nn.functional.cross_entropy(
+                torch.nn.functional.cross_entropy(
                     text_logits.flatten(0, 1),  # (B, T, Vt) -> (*, Vt)
                     inputs["text_labels"].flatten(0, 1),
                     reduction="none",
-                ) * inputs["loss_scale"][:, :, 0].flatten(0, 1)).sum(-1)
-                / num_frames
-            )
+                )
+                * inputs["loss_scale"][:, :, 0].flatten(0, 1)
+            ).sum(-1) / num_frames
 
             # mask audio logits to ignore sequence padding
             audio_logits = forward_outputs["audio_logits"]
@@ -747,13 +842,13 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 audio_logits = audio_logits * inputs["seq_mask"][:, :, -1].unsqueeze(-1).unsqueeze(-1)
 
             audio_loss = (
-                (torch.nn.functional.cross_entropy(
+                torch.nn.functional.cross_entropy(
                     audio_logits.flatten(0, 2),  # (B, T, K, Vs) -> (*, Vs)
                     inputs["audio_labels"].flatten(0, 2),
                     reduction="none",
-                ) * inputs["loss_scale"][:, :, 1:].flatten(0, 2)).sum(-1)
-                / (num_frames * self._num_codebooks)
-            )
+                )
+                * inputs["loss_scale"][:, :, 1:].flatten(0, 2)
+            ).sum(-1) / (num_frames * self._num_codebooks)
 
         loss = self.cfg.text_loss_weight * text_loss + self.cfg.audio_loss_weight * audio_loss
 
@@ -776,7 +871,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
     def on_train_epoch_start(self) -> None:
         setup_audio_codec(self)  # potentially reloads the audio codec to make sure it's in fp32
         if hasattr(self.speech_generation, "use_speaker_encoder") and self.speech_generation.use_speaker_encoder:
-            self.speech_generation.setup_speaker_encoder() # potentially reloads the speaker encoder to make sure it's in fp32
+            self.speech_generation.setup_speaker_encoder()  # potentially reloads the speaker encoder to make sure it's in fp32
 
     def on_validation_epoch_start(self) -> None:
         self.on_train_epoch_start()
@@ -784,9 +879,15 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
 
         self.asr_bleu = ASRBLEU(self.cfg.scoring_asr).reset()
         self.bleu = BLEU().reset()
-        tolerance = int(self.cfg.get("val_acc_tolerance", 160)/(1000/self.target_fps)) # 160 ms as default tolerance --> 2 tokens for 12.5FPS and 1 for 25FPS
-        self.text_bos_acc = TokenAccuracy(token_name="text_bos", token_id=self.text_bos_id, tolerance=tolerance).reset()
-        self.text_eos_acc = TokenAccuracy(token_name="text_eos", token_id=self.text_eos_id, tolerance=tolerance).reset()
+        tolerance = int(
+            self.cfg.get("val_acc_tolerance", 160) / (1000 / self.target_fps)
+        )  # 160 ms as default tolerance --> 2 tokens for 12.5FPS and 1 for 25FPS
+        self.text_bos_acc = TokenAccuracy(
+            token_name="text_bos", token_id=self.text_bos_id, tolerance=tolerance
+        ).reset()
+        self.text_eos_acc = TokenAccuracy(
+            token_name="text_eos", token_id=self.text_eos_id, tolerance=tolerance
+        ).reset()
 
     def on_validation_epoch_end(self, prefix="val") -> None:
         asr_bleu = self.asr_bleu.compute()
@@ -806,7 +907,9 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
 
         # Update speaker embedding to reflect the one in the prompt during inference
         if self.speech_generation.use_speaker_encoder and self.speech_generation.inference_speaker_reference:
-            self.speech_generation.update_inference_speaker_embedding(self.speech_generation.inference_speaker_reference)
+            self.speech_generation.update_inference_speaker_embedding(
+                self.speech_generation.inference_speaker_reference
+            )
 
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
@@ -883,9 +986,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 * "audio_len" output lengths as number of waveform samples of shape (B,) (when `decode_audio=True`).
         """
         source_encoded, lengths, asr_emb = self.perception(
-            input_signal=input_signal,
-            input_signal_length=input_signal_lens,
-            return_encoder_emb=True
+            input_signal=input_signal, input_signal_length=input_signal_lens, return_encoder_emb=True
         )
         B, T_local, H = source_encoded.shape
 
@@ -922,14 +1023,14 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
             dtype=torch.long,
         )
         ans = self(
-            input_embeds[:, :1], 
+            input_embeds[:, :1],
             cache=cache,
             input_audio_tokens=first_audio,
             seq_mask=None,
-            target_text_tokens=None, # text input will be sampled from llm backbone
+            target_text_tokens=None,  # text input will be sampled from llm backbone
             modality_adapter_emb=source_encoded[:, :1],
             asr_emb=asr_emb[:, :1],
-            speaker_encoder_emb=None, # for inference uses the cached inference_speaker_embedding
+            speaker_encoder_emb=None,  # for inference uses the cached inference_speaker_embedding
         )
         gen_text[:, 0] = ans["text_logits"][:, -1].argmax(dim=-1)
         gen_audio[:, 0] = ans["audio_logits"][:, -1].argmax(dim=-1)
@@ -944,10 +1045,10 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 cache=ans["cache"],
                 input_audio_tokens=current_audio,
                 seq_mask=None,
-                target_text_tokens=None, # text input will be sampled from llm backbone
+                target_text_tokens=None,  # text input will be sampled from llm backbone
                 modality_adapter_emb=source_encoded[:, t : t + 1],
                 asr_emb=asr_emb[:, t : t + 1],
-                speaker_encoder_emb=None, # for inference uses the cached inference_speaker_embedding
+                speaker_encoder_emb=None,  # for inference uses the cached inference_speaker_embedding
             )
             gen_text[:, t] = ans["text_logits"][:, -1].argmax(dim=-1)
             gen_audio[:, t] = ans["audio_logits"][:, -1].argmax(dim=-1)
