@@ -728,6 +728,7 @@ def s2s_sample_sequence_batch(
 
     tokenizer = model.tokenizer
     # initialize the batch
+
     with torch.no_grad():
         context_tokens, input_embeddings, audio_feat_lens = inference_strategy.init_batch(
             context_tokens,
@@ -757,18 +758,89 @@ def s2s_sample_sequence_batch(
             maxlen = context_tokens.shape[1]
         maxlen = inference_strategy.clip_max_len(maxlen)
         lengths = torch.ones([batch_size]).long().cuda() * maxlen
-        while context_length < maxlen:
-            batch, tensor_shape = inference_strategy.prepare_batch_at_step(
-                tokens,
-                input_embeddings,
-                maxlen,
-                micro_batch_size,
-                counter,
-                audio_text_context_lengths,
-                context_length,
-                compute_attention_mask,
+
+        import time # for basic profiling
+
+        # We want to simulate a situation with audio coming in chunk-by-chunk
+        # => keep audio_signal as the full audio that we know we will have,
+        # and use audio_signal_so_far_padded to keep track of audio chunks received "so far".
+        # Downstream code requires audio to be padded, so we will also create audio_signal_padded.
+        # audio_signal_so_far_padded will be same shape as audio_signal_padded
+        INPUT_AUDIO_CHUNK_SIZE_SEC = 0.08
+        input_audio_chunk_size_samples = int(INPUT_AUDIO_CHUNK_SIZE_SEC * 16000) # hard-coding sample rate to 16kHz TODO: dont hardcode
+
+        padded_len_samples = int(maxlen * input_audio_chunk_size_samples)
+
+        audio_signal_padded = torch.zeros((batch_size, padded_len_samples), dtype=audio_signal.dtype, device=audio_signal.device)
+        audio_signal_padded[:, :audio_signal.shape[1]] = audio_signal
+
+        # init audio_signal_so_far_padded here, will update its vals in while-loop
+        audio_signal_so_far_padded = torch.zeros_like(audio_signal_padded)
+
+        while context_length < maxlen: # for debugging can replace maxlen with some int, e.g. 100
+            logging.info(f'{context_length = }')
+            start_iteration_time = time.time()
+
+            # adding CHUNKS_FUTURE_AUDIO to control how much "future audio" passed to encoder
+            CHUNKS_FUTURE_AUDIO = 2 # if set to 1 or 2 -> empty pred_text. if set to 5 -> pred_text is not very logical
+            sample_copy_till = input_audio_chunk_size_samples * (counter + CHUNKS_FUTURE_AUDIO)
+            sample_copy_till = min(sample_copy_till, audio_signal_padded.shape[1]) # dont exceed audio length
+            audio_signal_so_far_padded[:, :sample_copy_till] = audio_signal_padded[:, :sample_copy_till]
+
+            #import ipdb; ipdb.set_trace()
+            logging.info(f"{sample_copy_till = }")
+
+            with torch.no_grad(): # added torch.no_grad in case it helped, but don't observe any difference
+                encoded, encoded_len = model.perception(
+                    input_signal=audio_signal_padded, # not using audio_signal_so_far_padded because it will be trimmed to "sample_copy_till" anyway
+                    input_signal_length=torch.ones([batch_size]).long().cuda() * sample_copy_till,
+                    processed_signal=None,
+                    processed_signal_length=None,
+                )
+
+            if counter == 0:
+                tokens2use = tokens[:, :context_length] #  think this is also just equal to tokens and context_tokens
+                set_inference_key_value_memory = True
+                embeddings2use = input_embeddings[:context_length]
+            else:
+                tokens2use = tokens[:, context_length - 1].view(micro_batch_size, 1, -1)
+                set_inference_key_value_memory = False
+
+                embeddings2use = model._get_text_embeddings(tokens2use, None)
+                last_encoded = encoded[:, context_length-1].view(micro_batch_size, 1, -1)
+                embeddings2use = embeddings2use + last_encoded.transpose(0, 1).contiguous()
+
+
+
+            logging.info(f'time to get embeddings2use: {time.time() - start_iteration_time}')
+
+            setkey_value_array = torch.tensor(
+                [set_inference_key_value_memory] * micro_batch_size, device=torch.cuda.current_device()
             )
-            output = inference_strategy.forward_step(batch, tensor_shape)
+            len_array = torch.tensor([maxlen] * micro_batch_size, device=torch.cuda.current_device())
+            batch = [tokens2use, embeddings2use, None, None, setkey_value_array, len_array]
+            tensor_shape = [tokens2use.shape[1], micro_batch_size, model.cfg.hidden_size]            
+
+            #logging.info(f"{encoded.shape}")
+            #logging.info(f"{tokens.shape = }")
+            #logging.info(f"{last_tokens2use.shape = }")
+            #logging.info(f"{tokens2use.shape = }")
+            #logging.info("---")
+            #logging.info(f"setkey_value_array: {setkey_value_array}")
+            #logging.info(f"len_array: {len_array}")
+
+            #logging.info(f"tokens2use.shape: {tokens2use.shape}")
+            #logging.info(f"embeddings2use.shape: {embeddings2use.shape}")
+            #logging.info(f"micro_batch_size: {micro_batch_size}")
+            #logging.info(f"model.cfg.hidden_size: {model.cfg.hidden_size}")
+
+            #logging.info(f"{tensor_shape = }")
+
+
+            
+            output = inference_strategy.forward_step(batch, tensor_shape)            
+
+
             if parallel_state.is_pipeline_last_stage():
                 if compute_logprob:
                     output = output[0]['logits']
@@ -921,6 +993,7 @@ def s2s_sample_sequence_batch(
                 group = parallel_state.get_pipeline_model_parallel_group()
                 torch.distributed.broadcast(done, src, group)
 
+            logging.info(f'iteration time: {time.time() - start_iteration_time}')
             context_length += 1
             counter += 1
             if done:
