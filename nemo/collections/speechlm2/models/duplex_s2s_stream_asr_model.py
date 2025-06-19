@@ -111,6 +111,74 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
             user_weighted = user_embeds * self.cfg.get("duplex_user_channel_weight", 1.0)
             return agent_embeds + user_weighted
 
+    def cal_token_acc(self, pad_outputs, pad_targets, ignore_label):
+        pad_pred = pad_outputs.argmax(-1)
+        mask = pad_targets != ignore_label
+        numerator = torch.sum(pad_pred.masked_select(mask) == pad_targets.masked_select(mask))
+        denominator = torch.sum(mask)
+        return (numerator / denominator).detach().item()
+
+    def forward_step(self, batch: dict):
+        inputs = self.prepare_inputs(batch)
+        target_first_turn_audio = batch["target_first_turn_audio"]
+        target_first_turn_audio_lens = batch["target_first_turn_audio_lens"]
+        speaker_encoder_emb = self.speech_generation.get_speaker_embedding(
+            target_first_turn_audio, target_first_turn_audio_lens, self.target_sample_rate
+        )
+        forward_outputs = self(
+            inputs["input_embeds"],
+            input_audio_tokens=inputs["input_audio_tokens"],
+            seq_mask=inputs["seq_mask"],
+            target_text_tokens=inputs["text_labels"],
+            modality_adapter_emb=inputs["perception_emb"],
+            asr_emb=inputs["asr_emb"],
+            speaker_encoder_emb=speaker_encoder_emb,
+        )
+        num_frames = inputs["input_lens"].sum()
+        logs = {}
+        with loss_parallel():
+            # mask audio logits to ignore sequence padding
+            text_logits = forward_outputs["text_logits"]
+            if self.cfg.get("mask_sequence_loss", True):
+                text_logits = text_logits * inputs["seq_mask"][:, :, 0].unsqueeze(-1)
+
+            logs['text_loss'] = (
+                torch.nn.functional.cross_entropy(
+                    text_logits.flatten(0, 1),  # (B, T, Vt) -> (*, Vt)
+                    inputs["text_labels"].flatten(0, 1),
+                    reduction="none",
+                )
+                * inputs["loss_scale"][:, :, 0].flatten(0, 1)
+            ).sum(-1) / num_frames
+
+            # mask audio logits to ignore sequence padding
+            audio_logits = forward_outputs["audio_logits"]
+            if self.cfg.get("mask_sequence_loss", True):
+                audio_logits = audio_logits * inputs["seq_mask"][:, :, -1].unsqueeze(-1).unsqueeze(-1)
+
+            logs['audio_loss'] = (
+                torch.nn.functional.cross_entropy(
+                    audio_logits.flatten(0, 2),  # (B, T, K, Vs) -> (*, Vs)
+                    inputs["audio_labels"].flatten(0, 2),
+                    reduction="none",
+                )
+                * inputs["loss_scale"][:, :, 1:].flatten(0, 2)
+            ).sum(-1) / (num_frames * self._num_codebooks)
+
+        logs['loss'] = self.cfg.text_loss_weight * logs['text_loss'] + self.cfg.audio_loss_weight * logs['audio_loss']
+        logs['text_acc'] = self.cal_token_acc(
+            forward_outputs["text_logits"].flatten(0, 1), inputs["text_labels"].flatten(0, 1), 0
+        )
+        logs['audio_acc'] = self.cal_token_acc(
+            forward_outputs["audio_logits"].flatten(0, 1), inputs["audio_labels"].flatten(0, 1), -1
+        )
+        prefix = "train" if self.training else "val"
+        for k, m in logs.items():
+            if isinstance(m, torch.Tensor):
+                m = m.to(self.device)
+            self.log(f"{prefix}_{k}", m, on_epoch=True, sync_dist=True)
+        return logs
+
     def validation_step(self, batch: dict, batch_idx: int):
 
         # Update speaker embedding to reflect the one in the prompt during inference
@@ -123,6 +191,7 @@ class DuplexAsr2SModel(DuplexS2SSpeechDecoderModel):
             if dataset_batch is None:
                 continue  # some dataset is exhausted
 
+            self.forward_step(dataset_batch)
             results = self.offline_t2t_inference(
                 dataset_batch["source_tokens"],
                 dataset_batch["source_token_lens"],
