@@ -876,7 +876,7 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
         )
         # move back text channel by x, in inference it advance the text channel prediction
         # it is the oposite of speech delay applied on text channel
-        if self.advance_text_channel_by:
+        if self.advance_text_channel_by and batch["formatter"][0] != 's2s_duplex_overlap_as_s2s_duplex':
             pad = torch.full(
                 (target_tokens.shape[0], self.advance_text_channel_by),
                 fill_value=self.text_pad_id,
@@ -1886,8 +1886,11 @@ class DuplexS2SSpeechDecoderModel(LightningModule, HFHubMixin):
                 speech_state = torch.where(
                     gen_text[:, t] == self.text_bos_id, torch.ones_like(speech_state), speech_state
                 )
+                speech_channel_delay = self.cfg.get('inference_force_speech_state_speech_channel_delay', 0)
                 speech_state = torch.where(
-                    gen_text[:, t] == self.text_eos_id, torch.zeros_like(speech_state), speech_state
+                    gen_text[:, t - speech_channel_delay] == self.text_eos_id,
+                    torch.zeros_like(speech_state),
+                    speech_state,
                 )
                 gen_audio[:, t] = torch.where(
                     speech_state.unsqueeze(-1) == 0,
